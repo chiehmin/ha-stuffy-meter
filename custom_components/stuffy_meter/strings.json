@@ -1,0 +1,100 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Stuffy Meter",
+        "description": "Enter the monitor's IP address or .local hostname. Admin password is optional and only needed for the Reboot button.",
+        "data": {
+          "host": "Host or IP address",
+          "password": "Admin password (optional)"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Discovered Stuffy Meter",
+        "description": "Add {name} ({host}) to Home Assistant? Admin password is optional and only needed for the Reboot button.",
+        "data": {
+          "password": "Admin password (optional)"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Stuffy Meter",
+        "description": "Update the monitor's host or admin password.",
+        "data": {
+          "host": "Host or IP address",
+          "password": "Admin password (optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the monitor. Check the IP/hostname and ensure it is on the same network.",
+      "invalid_auth": "Invalid admin password.",
+      "invalid_device": "The host responded, but it does not look like a Stuffy Meter.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This Stuffy Meter is already configured.",
+      "cannot_connect": "Cannot connect to the discovered Stuffy Meter.",
+      "invalid_device": "The discovered device did not return a valid Stuffy Meter status.",
+      "reconfigure_successful": "Reconfiguration succeeded.",
+      "unique_id_mismatch": "The host belongs to a different Stuffy Meter.",
+      "unknown": "Unexpected error during discovery."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Stuffy Meter Options",
+        "description": "Adjust the local polling interval or update the optional admin password.",
+        "data": {
+          "scan_interval": "Polling interval (seconds)",
+          "password": "Admin password (optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the monitor to verify the password.",
+      "invalid_auth": "Invalid admin password.",
+      "invalid_device": "The monitor did not return a valid status.",
+      "unknown": "Unexpected error."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "voc_index": {
+        "name": "VOC index"
+      },
+      "dew_point": {
+        "name": "Dew point"
+      },
+      "abs_humidity": {
+        "name": "Absolute humidity"
+      },
+      "air_quality": {
+        "name": "Air quality",
+        "state": {
+          "good": "Good",
+          "moderate": "Moderate",
+          "poor": "Poor",
+          "bad": "Bad"
+        }
+      },
+      "wifi_signal": {
+        "name": "Wi-Fi signal"
+      },
+      "uptime": {
+        "name": "Uptime"
+      },
+      "free_heap": {
+        "name": "Free heap"
+      },
+      "battery_voltage": {
+        "name": "Battery voltage"
+      }
+    },
+    "binary_sensor": {
+      "usb_power": {
+        "name": "USB power"
+      }
+    }
+  }
+}

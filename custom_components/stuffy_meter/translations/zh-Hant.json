@@ -1,0 +1,100 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "連線至 Stuffy Meter",
+        "description": "請輸入偵測器的 IP 位址或 .local 主機名稱。管理員密碼為選填，僅在需要「重新啟動」按鈕時使用。",
+        "data": {
+          "host": "主機名稱或 IP 位址",
+          "password": "管理員密碼（選填）"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "已探索到 Stuffy Meter",
+        "description": "要將 {name}（{host}）加入 Home Assistant 嗎？管理員密碼為選填，僅在需要「重新啟動」按鈕時使用。",
+        "data": {
+          "password": "管理員密碼（選填）"
+        }
+      },
+      "reconfigure": {
+        "title": "重新設定 Stuffy Meter",
+        "description": "更新偵測器的主機位址或管理員密碼。",
+        "data": {
+          "host": "主機名稱或 IP 位址",
+          "password": "管理員密碼（選填）"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "無法連線至偵測器，請確認 IP／主機名稱正確且位於同一區域網路。",
+      "invalid_auth": "管理員密碼錯誤。",
+      "invalid_device": "此位址有回應，但不是有效的 Stuffy Meter 裝置。",
+      "unknown": "發生未預期的錯誤。"
+    },
+    "abort": {
+      "already_configured": "這台 Stuffy Meter 已經設定過了。",
+      "cannot_connect": "無法連線至探索到的 Stuffy Meter。",
+      "invalid_device": "探索到的裝置未回傳有效的 Stuffy Meter 狀態。",
+      "reconfigure_successful": "重新設定成功。",
+      "unique_id_mismatch": "該位址對應的是另一台 Stuffy Meter。",
+      "unknown": "探索過程中發生未預期的錯誤。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Stuffy Meter 選項",
+        "description": "調整本地輪詢間隔，或更新選填的管理員密碼。",
+        "data": {
+          "scan_interval": "輪詢間隔（秒）",
+          "password": "管理員密碼（選填）"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "無法連線至偵測器以驗證密碼。",
+      "invalid_auth": "管理員密碼錯誤。",
+      "invalid_device": "偵測器未回傳有效的狀態資料。",
+      "unknown": "發生未預期的錯誤。"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "voc_index": {
+        "name": "VOC 指數"
+      },
+      "dew_point": {
+        "name": "露點溫度"
+      },
+      "abs_humidity": {
+        "name": "絕對濕度"
+      },
+      "air_quality": {
+        "name": "空氣品質",
+        "state": {
+          "good": "良好",
+          "moderate": "普通",
+          "poor": "不佳",
+          "bad": "差"
+        }
+      },
+      "wifi_signal": {
+        "name": "Wi-Fi 訊號"
+      },
+      "uptime": {
+        "name": "運作時間"
+      },
+      "free_heap": {
+        "name": "剩餘記憶體"
+      },
+      "battery_voltage": {
+        "name": "電池電壓"
+      }
+    },
+    "binary_sensor": {
+      "usb_power": {
+        "name": "USB 電源"
+      }
+    }
+  }
+}

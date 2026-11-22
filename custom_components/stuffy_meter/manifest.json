@@ -1,0 +1,16 @@
+{
+  "domain": "stuffy_meter",
+  "name": "Stuffy Meter",
+  "codeowners": ["@chiehmin"],
+  "config_flow": true,
+  "documentation": "https://github.com/chiehmin/ha-stuffy-meter",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/chiehmin/ha-stuffy-meter/issues",
+  "requirements": [],
+  "version": "0.1.0",
+  "zeroconf": [
+    "_stuffymeter._tcp.local.",
+    "_smartaq._tcp.local."
+  ]
+}
