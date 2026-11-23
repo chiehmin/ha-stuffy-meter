@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from typing import Any
 from urllib.parse import urlsplit
 
 import aiohttp
 
-from .const import ADMIN_USERNAME, API_TIMEOUT, IDENTIFY_SECONDS
+from .const import ADMIN_USERNAME, API_TIMEOUT, IDENTIFY_SECONDS, OTA_CHECK_TIMEOUT
 
 
 class StuffyMeterError(Exception):
@@ -17,6 +18,14 @@ class StuffyMeterError(Exception):
 
 class StuffyMeterConnectionError(StuffyMeterError):
     """Raised when the monitor cannot be reached."""
+
+
+class StuffyMeterApiError(StuffyMeterConnectionError):
+    """Raised when the monitor returns an HTTP >= 400 error response."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class StuffyMeterAuthError(StuffyMeterError):
@@ -62,10 +71,13 @@ class StuffyMeterClient:
         """Return the base HTTP URL for the monitor."""
         return f"http://{self._host}"
 
-    def _auth(self) -> aiohttp.BasicAuth | None:
+    def _auth_header(self) -> str | None:
         if not self._password:
             return None
-        return aiohttp.BasicAuth(ADMIN_USERNAME, self._password)
+        token = base64.b64encode(
+            f"{ADMIN_USERNAME}:{self._password}".encode("utf-8")
+        ).decode("ascii")
+        return f"Basic {token}"
 
     async def _request_json(
         self,
@@ -74,11 +86,21 @@ class StuffyMeterClient:
         *,
         json_body: dict[str, Any] | None = None,
         use_auth: bool = False,
+        timeout: int | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         headers: dict[str, str] = {}
         if method == "POST":
             headers["Content-Type"] = "application/json"
+        if use_auth:
+            auth_hdr = self._auth_header()
+            if auth_hdr:
+                headers["Authorization"] = auth_hdr
+        req_timeout = (
+            aiohttp.ClientTimeout(total=timeout)
+            if timeout is not None
+            else self._timeout
+        )
 
         try:
             async with self._session.request(
@@ -86,16 +108,25 @@ class StuffyMeterClient:
                 url,
                 json=json_body if method == "POST" else None,
                 headers=headers or None,
-                auth=self._auth() if use_auth else None,
-                timeout=self._timeout,
+                timeout=req_timeout,
             ) as resp:
                 if resp.status in (401, 403):
                     raise StuffyMeterAuthError(
                         f"Authentication failed for {path} (HTTP {resp.status})"
                     )
                 if resp.status >= 400:
-                    raise StuffyMeterConnectionError(
-                        f"Unexpected HTTP {resp.status} from {url}"
+                    err_msg = ""
+                    try:
+                        err_body = await resp.json(content_type=None)
+                        if isinstance(err_body, dict) and isinstance(
+                            err_body.get("error"), str
+                        ):
+                            err_msg = err_body["error"].strip()
+                    except (ValueError, aiohttp.ContentTypeError):
+                        pass
+                    raise StuffyMeterApiError(
+                        resp.status,
+                        err_msg or f"Unexpected HTTP {resp.status} from {url}",
                     )
                 try:
                     data = await resp.json(content_type=None)
@@ -148,4 +179,18 @@ class StuffyMeterClient:
             "/api/reboot",
             json_body={},
             use_auth=True,
+        )
+
+    async def async_get_ota(self) -> dict[str, Any]:
+        """Fetch GET /api/ota (public endpoint: slots, auto-update status, notes URL)."""
+        return await self._request_json("GET", "/api/ota")
+
+    async def async_check_ota(self, *, install: bool = False) -> dict[str, Any]:
+        """Check the configured OTA manifest and optionally start installing (admin endpoint)."""
+        return await self._request_json(
+            "POST",
+            "/api/ota/check",
+            json_body={"install": install},
+            use_auth=True,
+            timeout=OTA_CHECK_TIMEOUT,
         )

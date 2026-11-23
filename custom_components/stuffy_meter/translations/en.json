@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to Stuffy Meter",
-        "description": "Enter the monitor's IP address or .local hostname. Admin password is optional and only needed for the Reboot button.",
+        "description": "Enter the monitor's IP address or .local hostname. Admin password is optional and only needed for Reboot and Firmware Updates.",
         "data": {
           "host": "Host or IP address",
           "password": "Admin password (optional)"
@@ -11,7 +11,7 @@
       },
       "zeroconf_confirm": {
         "title": "Discovered Stuffy Meter",
-        "description": "Add {name} ({host}) to Home Assistant? Admin password is optional and only needed for the Reboot button.",
+        "description": "Add {name} ({host}) to Home Assistant? Admin password is optional and only needed for Reboot and Firmware Updates.",
         "data": {
           "password": "Admin password (optional)"
         }
@@ -94,6 +94,11 @@
     "binary_sensor": {
       "usb_power": {
         "name": "USB power"
+      }
+    },
+    "button": {
+      "check_updates": {
+        "name": "Check for updates"
       }
     }
   }

@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "連線至 Stuffy Meter",
-        "description": "請輸入偵測器的 IP 位址或 .local 主機名稱。管理員密碼為選填，僅在需要「重新啟動」按鈕時使用。",
+        "description": "請輸入偵測器的 IP 位址或 .local 主機名稱。管理員密碼為選填，僅在需要「重新啟動」與「韌體更新」時使用。",
         "data": {
           "host": "主機名稱或 IP 位址",
           "password": "管理員密碼（選填）"
@@ -11,7 +11,7 @@
       },
       "zeroconf_confirm": {
         "title": "已探索到 Stuffy Meter",
-        "description": "要將 {name}（{host}）加入 Home Assistant 嗎？管理員密碼為選填，僅在需要「重新啟動」按鈕時使用。",
+        "description": "要將 {name}（{host}）加入 Home Assistant 嗎？管理員密碼為選填，僅在需要「重新啟動」與「韌體更新」時使用。",
         "data": {
           "password": "管理員密碼（選填）"
         }
@@ -94,6 +94,11 @@
     "binary_sensor": {
       "usb_power": {
         "name": "USB 電源"
+      }
+    },
+    "button": {
+      "check_updates": {
+        "name": "檢查韌體更新"
       }
     }
   }

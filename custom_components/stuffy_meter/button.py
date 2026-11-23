@@ -16,7 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .api import StuffyMeterAuthError, StuffyMeterClient, StuffyMeterError
+from .api import StuffyMeterAuthError, StuffyMeterError
 from .const import DOMAIN
 from .coordinator import StuffyMeterCoordinator
 from .entity import StuffyMeterEntity
@@ -26,7 +26,7 @@ from .entity import StuffyMeterEntity
 class StuffyMeterButtonDescription(ButtonEntityDescription):
     """Describe a Stuffy Meter button entity."""
 
-    press_fn: Callable[[StuffyMeterClient], Awaitable[object]]
+    press_fn: Callable[[StuffyMeterCoordinator], Awaitable[object]]
 
 
 BUTTONS: tuple[StuffyMeterButtonDescription, ...] = (
@@ -34,13 +34,20 @@ BUTTONS: tuple[StuffyMeterButtonDescription, ...] = (
         key="identify",
         device_class=ButtonDeviceClass.IDENTIFY,
         entity_category=EntityCategory.DIAGNOSTIC,
-        press_fn=lambda client: client.async_identify(),
+        press_fn=lambda coord: coord.client.async_identify(),
     ),
     StuffyMeterButtonDescription(
         key="reboot",
         device_class=ButtonDeviceClass.RESTART,
         entity_category=EntityCategory.CONFIG,
-        press_fn=lambda client: client.async_reboot(),
+        press_fn=lambda coord: coord.client.async_reboot(),
+    ),
+    StuffyMeterButtonDescription(
+        key="check_updates",
+        translation_key="check_updates",
+        icon="mdi:update",
+        entity_category=EntityCategory.CONFIG,
+        press_fn=lambda coord: coord.async_check_for_updates(),
     ),
 )
 
@@ -73,7 +80,7 @@ class StuffyMeterButton(StuffyMeterEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Invoke the button action on the monitor."""
         try:
-            await self.entity_description.press_fn(self.coordinator.client)
+            await self.entity_description.press_fn(self.coordinator)
         except StuffyMeterAuthError as err:
             raise HomeAssistantError(
                 "Admin password is required for this action; set it in Stuffy Meter integration options."

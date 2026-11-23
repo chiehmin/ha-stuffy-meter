@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
+import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -13,7 +14,13 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import StuffyMeterClient, StuffyMeterError
-from .const import CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import (
+    CONF_SCAN_INTERVAL,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+    OTA_INFO_REFRESH_INTERVAL,
+    OTA_INFO_RETRY_INTERVAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +44,16 @@ def extract_model_name(data: dict[str, Any]) -> str:
     if board:
         return f"Stuffy Meter USB (rev {board})"
     return str(device.get("model") or "Stuffy Meter")
+
+
+def _ota_version_key(data: dict[str, Any]) -> tuple[str, str]:
+    """Return (fw_version, available_version) from a /api/status payload."""
+    device = data.get("device") or {}
+    ota = data.get("ota") or {}
+    return (
+        str(device.get("fw_version") or ""),
+        str(ota.get("available_version") or ""),
+    )
 
 
 class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -63,6 +80,9 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._last_device_name: str | None = None
         self._last_sw_version: str | None = None
+        self.ota_info: dict[str, Any] | None = None
+        self._ota_info_fetched_at: float = 0.0
+        self._last_ota_key: tuple[str, str] | None = None
 
     @property
     def device_id(self) -> str:
@@ -80,6 +100,62 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
         return isinstance(self.data.get("power"), dict)
 
+    def _should_refresh_ota_info(self, data: dict[str, Any]) -> bool:
+        """Return True when GET /api/ota metadata should be refreshed."""
+        if self._ota_info_fetched_at == 0.0:
+            return True
+        if _ota_version_key(data) != self._last_ota_key:
+            return True
+        auto = (
+            self.ota_info.get("auto")
+            if isinstance(self.ota_info, dict)
+            else None
+        )
+        last_result = auto.get("last_result") if isinstance(auto, dict) else ""
+        interval = (
+            OTA_INFO_RETRY_INTERVAL
+            if not last_result
+            else OTA_INFO_REFRESH_INTERVAL
+        )
+        return (time.monotonic() - self._ota_info_fetched_at) >= interval
+
+    async def async_refresh_ota_info(
+        self,
+        status_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch GET /api/ota metadata without failing the main status poll."""
+        self._ota_info_fetched_at = time.monotonic()
+        ref = status_data if status_data is not None else self.data
+        if isinstance(ref, dict):
+            self._last_ota_key = _ota_version_key(ref)
+        try:
+            self.ota_info = await self.client.async_get_ota()
+        except StuffyMeterError as err:
+            _LOGGER.debug(
+                "Could not fetch /api/ota from %s: %s",
+                self.client.host,
+                err,
+            )
+        return self.ota_info
+
+    def async_apply_status(self, data: dict[str, Any]) -> None:
+        """Sync device registry metadata and push fresh /api/status data to entities."""
+        self._sync_device_registry(data)
+        self.async_set_updated_data(data)
+
+    async def async_check_for_updates(self) -> dict[str, Any]:
+        """Trigger POST /api/ota/check (report only) and refresh cached OTA/status data."""
+        result = await self.client.async_check_ota(install=False)
+        await self.async_refresh_ota_info()
+        try:
+            status = await self.client.async_get_status()
+        except StuffyMeterError:
+            await self.async_request_refresh()
+        else:
+            self._last_ota_key = _ota_version_key(status)
+            self.async_apply_status(status)
+        return result
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch the latest status JSON from the monitor."""
         try:
@@ -88,6 +164,8 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(str(err)) from err
 
         self._sync_device_registry(data)
+        if self._should_refresh_ota_info(data):
+            await self.async_refresh_ota_info(data)
         return data
 
     def _sync_device_registry(self, data: dict[str, Any]) -> None:

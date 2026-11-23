@@ -6,7 +6,8 @@ Custom [Home Assistant](https://www.home-assistant.io/) integration for the **St
 
 - **Automatic discovery**: Detects Stuffy Meter devices on your LAN via mDNS (`_stuffymeter._tcp` and legacy `_smartaq._tcp`).
 - **Local polling**: Polls `GET /api/status` directly over your local network (default every 15 seconds, configurable 5–300 s).
-- **No password required for sensors**: Reading sensors and triggering **Identify** work out of the box without entering the admin password. The admin password is only needed if you want to use the **Reboot** button.
+- **No password required for sensors**: Reading sensors, seeing available updates, and triggering **Identify** work out of the box without entering the admin password. The admin password is only needed if you want to trigger **Reboot**, **Check for updates**, or **Firmware** OTA installation from Home Assistant (when an admin password is set on the monitor).
+- **In-app OTA firmware updates**: Native Home Assistant `update` entity surfaces available firmware releases in **Settings → Updates** with release notes links, live download progress (0–100%), and one-click OTA installation directly from the Home Assistant UI.
 - **Supports both hardware editions**: Automatically exposes battery and USB-power entities for Battery edition (rev 4.x) boards alongside USB edition (rev 3.2) boards.
 - **Live name & firmware sync**: Renaming a monitor (`device_name`, e.g. `客廳` / `Living Room`) or upgrading firmware via OTA automatically updates its device metadata in Home Assistant.
 
@@ -57,12 +58,14 @@ Copy `custom_components/stuffy_meter` into your Home Assistant `config/custom_co
 | Uptime | `s` | Diagnostic |
 | Free heap | `B` | Diagnostic |
 
-### Buttons (all boards)
+### Firmware Update & Buttons (all boards)
 
-| Entity | Action | Category |
-| --- | --- | --- |
-| Identify | Blinks LED and flashes screen for 10 s (`POST /api/identify`) | Diagnostic |
-| Reboot | Reboots the monitor (`POST /api/reboot`, requires optional admin password) | Config |
+| Entity | Type | Action / Details | Category |
+| --- | --- | --- | --- |
+| Firmware | Update | Shows installed vs. latest firmware version, links to release notes, and installs OTA updates with live progress (`GET /api/ota`, `POST /api/ota/check`) | Config |
+| Check for updates | Button | Immediately checks the monitor's OTA manifest for a newer firmware release (`POST /api/ota/check`, requires optional admin password) | Config |
+| Identify | Button | Blinks LED and flashes screen for 10 s (`POST /api/identify`) | Diagnostic |
+| Reboot | Button | Reboots the monitor (`POST /api/reboot`, requires optional admin password) | Config |
 
 ### Battery edition (rev 4.x only)
 
@@ -79,7 +82,7 @@ Copy `custom_components/stuffy_meter` into your Home Assistant `config/custom_co
 
 1. 點擊本頁上方的 **HACS** 按鈕（或在 HACS 右上角選單 →「自訂儲存庫」加入 `https://github.com/chiehmin/ha-stuffy-meter`，類型選「整合」）。
 2. 下載 **Stuffy Meter** 並重新啟動 Home Assistant。
-3. 重新啟動後，Home Assistant 會自動透過區域網路 mDNS 探索同網段的 Stuffy Meter，於「設定 → 裝置與服務」點擊設定即可完成（不需架設 MQTT 伺服器，管理員密碼為選填）。
+3. 重新啟動後，Home Assistant 會自動透過區域網路 mDNS 探索同網段的 Stuffy Meter，於「設定 → 裝置與服務」點擊設定即可完成（不需架設 MQTT 伺服器，管理員密碼為選填；若偵測器有設定管理員密碼，輸入後即可直接在 Home Assistant 介面執行重新啟動、檢查更新與 OTA 韌體更新）。
 
 ## License
 
