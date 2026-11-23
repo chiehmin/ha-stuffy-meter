@@ -967,24 +967,12 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_update_badges_summary_and_firmware_sensor(self) -> None:
+    def test_update_icons_summary_and_firmware_sensor(self) -> None:
         from unittest.mock import MagicMock
-        import xml.etree.ElementTree as ET
 
         sensor_mod = _load_module(
             "custom_components.stuffy_meter.sensor", COMP / "sensor.py"
         )
-
-        # Validate all three SVG data URIs decode to valid SVG XML
-        for uri in (
-            self.update_mod.UPDATE_PICTURE_AVAILABLE,
-            self.update_mod.UPDATE_PICTURE_INSTALLING,
-            self.update_mod.UPDATE_PICTURE_UP_TO_DATE,
-        ):
-            self.assertTrue(uri.startswith("data:image/svg+xml;base64,"))
-            svg_xml = base64.b64decode(uri.split(",", 1)[1]).decode("utf-8")
-            root = ET.fromstring(svg_xml)
-            self.assertTrue(root.tag.endswith("svg"))
 
         client = MagicMock()
         client.host = "192.168.1.42"
@@ -993,18 +981,17 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
         fw_desc = next(s for s in sensor_mod.BASE_SENSORS if s.key == "firmware_version")
         fw_sensor = sensor_mod.StuffyMeterSensor(coord, fw_desc)
 
-        # 1. Up to date
+        # 1. Up to date (native HA MDI icon, no brand entity_picture)
         coord.data = self._make_status(fw_version="1.10.2", available_version="")
-        self.assertEqual(upd.entity_picture, self.update_mod.UPDATE_PICTURE_UP_TO_DATE)
+        self.assertIsNone(upd.entity_picture)
         self.assertEqual(upd.icon, "mdi:package-check")
         self.assertIsNone(upd.release_summary)
         self.assertEqual(fw_sensor.native_value, "1.10.2")
         self.assertEqual(fw_sensor.icon, "mdi:package-check")
-        self.assertIsNone(fw_sensor.entity_picture)
 
         # 2. Update available
         coord.data = self._make_status(fw_version="1.10.2", available_version="2.0.1")
-        self.assertEqual(upd.entity_picture, self.update_mod.UPDATE_PICTURE_AVAILABLE)
+        self.assertIsNone(upd.entity_picture)
         self.assertEqual(upd.icon, "mdi:package-up")
         self.assertEqual(
             upd.release_summary,
@@ -1012,7 +999,6 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
         )
         self.assertEqual(fw_sensor.native_value, "1.10.2 → 2.0.1")
         self.assertEqual(fw_sensor.icon, "mdi:package-up")
-        self.assertEqual(fw_sensor.entity_picture, self.update_mod.UPDATE_PICTURE_AVAILABLE)
 
         # 3. Installing
         coord.data = self._make_status(
@@ -1022,7 +1008,7 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
             available_version="2.0.1",
             new_version="2.0.1",
         )
-        self.assertEqual(upd.entity_picture, self.update_mod.UPDATE_PICTURE_INSTALLING)
+        self.assertIsNone(upd.entity_picture)
         self.assertEqual(upd.icon, "mdi:progress-download")
 
 

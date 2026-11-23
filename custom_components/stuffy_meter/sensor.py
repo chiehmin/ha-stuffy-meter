@@ -37,7 +37,6 @@ except ImportError:  # pragma: no cover - Home Assistant < 2026.8
 from .const import DOMAIN
 from .coordinator import StuffyMeterCoordinator
 from .entity import StuffyMeterEntity
-from .update import UPDATE_PICTURE_AVAILABLE
 
 AIR_QUALITY_LEVELS = ["good", "moderate", "poor", "bad"]
 
@@ -48,7 +47,6 @@ class StuffyMeterSensorDescription(SensorEntityDescription):
 
     value_fn: Callable[[dict[str, Any]], Any]
     icon_fn: Callable[[dict[str, Any]], str | None] | None = None
-    picture_fn: Callable[[dict[str, Any]], str | None] | None = None
 
 
 def _get(data: dict[str, Any], section: str, field: str) -> Any:
@@ -98,13 +96,6 @@ def _firmware_version_icon(data: dict[str, Any]) -> str:
     if avail and avail != fw:
         return "mdi:package-up"
     return "mdi:package-check"
-
-
-def _firmware_version_picture(data: dict[str, Any]) -> str | None:
-    fw, avail = _firmware_versions(data)
-    if avail and avail != fw:
-        return UPDATE_PICTURE_AVAILABLE
-    return None
 
 
 BASE_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
@@ -200,7 +191,6 @@ BASE_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_firmware_version_state,
         icon_fn=_firmware_version_icon,
-        picture_fn=_firmware_version_picture,
     ),
 )
 
@@ -267,10 +257,3 @@ class StuffyMeterSensor(StuffyMeterEntity, SensorEntity):
         if self.entity_description.icon_fn and self.coordinator.data:
             return self.entity_description.icon_fn(self.coordinator.data)
         return self.entity_description.icon
-
-    @property
-    def entity_picture(self) -> str | None:
-        """Return dynamic entity picture when configured."""
-        if self.entity_description.picture_fn and self.coordinator.data:
-            return self.entity_description.picture_fn(self.coordinator.data)
-        return None
