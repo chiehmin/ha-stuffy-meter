@@ -57,6 +57,7 @@ Copy `custom_components/stuffy_meter` into your Home Assistant `config/custom_co
 | Wi-Fi signal | `dBm` | Diagnostic |
 | Uptime | `s` | Diagnostic |
 | Free heap | `B` | Diagnostic |
+| Firmware version | e.g. `1.10.2` or `1.10.2 → 2.0.1` | Diagnostic |
 
 ### Firmware Update & Buttons (all boards)
 

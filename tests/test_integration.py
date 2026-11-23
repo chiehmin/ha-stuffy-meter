@@ -120,6 +120,29 @@ def _install_ha_stubs() -> dict[str, Any]:
 
     const_mod.EntityCategory = EntityCategory
     const_mod.Platform = Platform
+    const_mod.PERCENTAGE = "%"
+    const_mod.SIGNAL_STRENGTH_DECIBELS_MILLIWATT = "dBm"
+
+    class UnitOfRatio(StrEnum):
+        PARTS_PER_MILLION = "ppm"
+
+    class UnitOfTemperature(StrEnum):
+        CELSIUS = "°C"
+
+    class UnitOfTime(StrEnum):
+        SECONDS = "s"
+
+    class UnitOfInformation(StrEnum):
+        BYTES = "B"
+
+    class UnitOfElectricPotential(StrEnum):
+        VOLT = "V"
+
+    const_mod.UnitOfRatio = UnitOfRatio
+    const_mod.UnitOfTemperature = UnitOfTemperature
+    const_mod.UnitOfTime = UnitOfTime
+    const_mod.UnitOfInformation = UnitOfInformation
+    const_mod.UnitOfElectricPotential = UnitOfElectricPotential
 
     # homeassistant.core
     core_mod = _register("homeassistant.core", types.ModuleType("homeassistant.core"))
@@ -295,6 +318,46 @@ def _install_ha_stubs() -> dict[str, Any]:
     btn_mod.ButtonDeviceClass = ButtonDeviceClass
     btn_mod.ButtonEntity = ButtonEntity
     btn_mod.ButtonEntityDescription = ButtonEntityDescription
+
+    sens_mod = _register(
+        "homeassistant.components.sensor",
+        types.ModuleType("homeassistant.components.sensor"),
+    )
+
+    class SensorDeviceClass(StrEnum):
+        CO2 = "carbon_dioxide"
+        TEMPERATURE = "temperature"
+        HUMIDITY = "humidity"
+        ENUM = "enum"
+        SIGNAL_STRENGTH = "signal_strength"
+        DURATION = "duration"
+        DATA_SIZE = "data_size"
+        BATTERY = "battery"
+        VOLTAGE = "voltage"
+
+    class SensorStateClass(StrEnum):
+        MEASUREMENT = "measurement"
+        TOTAL_INCREASING = "total_increasing"
+
+    @dataclass(frozen=True, kw_only=True)
+    class SensorEntityDescription:
+        key: str
+        translation_key: str | None = None
+        icon: str | None = None
+        device_class: SensorDeviceClass | None = None
+        native_unit_of_measurement: str | None = None
+        state_class: SensorStateClass | None = None
+        suggested_display_precision: int | None = None
+        options: list[str] | None = None
+        entity_category: EntityCategory | None = None
+
+    class SensorEntity:
+        pass
+
+    sens_mod.SensorDeviceClass = SensorDeviceClass
+    sens_mod.SensorStateClass = SensorStateClass
+    sens_mod.SensorEntity = SensorEntity
+    sens_mod.SensorEntityDescription = SensorEntityDescription
 
     return saved
 
@@ -903,6 +966,64 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
             self.assertFalse(entity.in_progress)
 
         asyncio.run(run())
+
+    def test_update_badges_summary_and_firmware_sensor(self) -> None:
+        from unittest.mock import MagicMock
+        import xml.etree.ElementTree as ET
+
+        sensor_mod = _load_module(
+            "custom_components.stuffy_meter.sensor", COMP / "sensor.py"
+        )
+
+        # Validate all three SVG data URIs decode to valid SVG XML
+        for uri in (
+            self.update_mod.UPDATE_PICTURE_AVAILABLE,
+            self.update_mod.UPDATE_PICTURE_INSTALLING,
+            self.update_mod.UPDATE_PICTURE_UP_TO_DATE,
+        ):
+            self.assertTrue(uri.startswith("data:image/svg+xml;base64,"))
+            svg_xml = base64.b64decode(uri.split(",", 1)[1]).decode("utf-8")
+            root = ET.fromstring(svg_xml)
+            self.assertTrue(root.tag.endswith("svg"))
+
+        client = MagicMock()
+        client.host = "192.168.1.42"
+        coord = self.coord_mod.StuffyMeterCoordinator(object(), self._make_entry(), client)
+        upd = self.update_mod.StuffyMeterFirmwareUpdate(coord)
+        fw_desc = next(s for s in sensor_mod.BASE_SENSORS if s.key == "firmware_version")
+        fw_sensor = sensor_mod.StuffyMeterSensor(coord, fw_desc)
+
+        # 1. Up to date
+        coord.data = self._make_status(fw_version="1.10.2", available_version="")
+        self.assertEqual(upd.entity_picture, self.update_mod.UPDATE_PICTURE_UP_TO_DATE)
+        self.assertEqual(upd.icon, "mdi:package-check")
+        self.assertIsNone(upd.release_summary)
+        self.assertEqual(fw_sensor.native_value, "1.10.2")
+        self.assertEqual(fw_sensor.icon, "mdi:package-check")
+        self.assertIsNone(fw_sensor.entity_picture)
+
+        # 2. Update available
+        coord.data = self._make_status(fw_version="1.10.2", available_version="2.0.1")
+        self.assertEqual(upd.entity_picture, self.update_mod.UPDATE_PICTURE_AVAILABLE)
+        self.assertEqual(upd.icon, "mdi:package-up")
+        self.assertEqual(
+            upd.release_summary,
+            "2.0.1 is available for update (installed: 1.10.2).",
+        )
+        self.assertEqual(fw_sensor.native_value, "1.10.2 → 2.0.1")
+        self.assertEqual(fw_sensor.icon, "mdi:package-up")
+        self.assertEqual(fw_sensor.entity_picture, self.update_mod.UPDATE_PICTURE_AVAILABLE)
+
+        # 3. Installing
+        coord.data = self._make_status(
+            fw_version="1.10.2",
+            ota_state="downloading",
+            progress=40,
+            available_version="2.0.1",
+            new_version="2.0.1",
+        )
+        self.assertEqual(upd.entity_picture, self.update_mod.UPDATE_PICTURE_INSTALLING)
+        self.assertEqual(upd.icon, "mdi:progress-download")
 
 
 if __name__ == "__main__":

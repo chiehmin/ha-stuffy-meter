@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from typing import Any
@@ -37,6 +38,52 @@ from .entity import StuffyMeterEntity
 _LOGGER = logging.getLogger(__name__)
 
 ACTIVE_OTA_STATES = frozenset({"receiving", "downloading", "verifying", "success"})
+
+
+def _svg_data_uri(svg: str) -> str:
+    """Encode an inline SVG string as a base64 data URI for HA state-badge."""
+    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+# Rounded-square update badges rendered by Home Assistant's state-badge
+UPDATE_PICTURE_AVAILABLE = _svg_data_uri(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
+    '<stop offset="0%" stop-color="#fbbf24"/>'
+    '<stop offset="100%" stop-color="#ea580c"/>'
+    "</linearGradient></defs>"
+    '<rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g)"/>'
+    '<path d="M32 18v21M22 28l10-10 10 10M20 45h24" fill="none" '
+    'stroke="#fff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>'
+    '<circle cx="51" cy="13" r="7" fill="#ef4444" stroke="#fff" stroke-width="2.5"/>'
+    "</svg>"
+)
+
+UPDATE_PICTURE_INSTALLING = _svg_data_uri(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
+    '<stop offset="0%" stop-color="#38bdf8"/>'
+    '<stop offset="100%" stop-color="#2563eb"/>'
+    "</linearGradient></defs>"
+    '<rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g)"/>'
+    '<path d="M32 17v21M22 29l10 10 10-10M20 46h24" fill="none" '
+    'stroke="#fff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>'
+    "</svg>"
+)
+
+UPDATE_PICTURE_UP_TO_DATE = _svg_data_uri(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
+    '<stop offset="0%" stop-color="#334155"/>'
+    '<stop offset="100%" stop-color="#1e293b"/>'
+    "</linearGradient></defs>"
+    '<rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g)"/>'
+    '<circle cx="32" cy="32" r="16" fill="none" stroke="#34d399" stroke-width="3.5"/>'
+    '<path d="M24.5 32.5l5 5 10.5-11" fill="none" stroke="#34d399" '
+    'stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>'
+    "</svg>"
+)
 
 
 async def async_setup_entry(
@@ -76,6 +123,32 @@ class StuffyMeterFirmwareUpdate(StuffyMeterEntity, UpdateEntity):
         auto = self.coordinator.ota_info.get("auto")
         return auto if isinstance(auto, dict) else {}
 
+    def _has_available_update(self) -> bool:
+        """Return True when the monitor reports a newer available_version."""
+        available = self._ota_status().get("available_version")
+        if not isinstance(available, str) or not available.strip():
+            return False
+        installed = self.installed_version
+        return installed is None or available.strip() != installed
+
+    @property
+    def entity_picture(self) -> str | None:
+        """Show a dedicated color-highlighted update badge instead of the brand logo."""
+        if self.in_progress:
+            return UPDATE_PICTURE_INSTALLING
+        if self._has_available_update():
+            return UPDATE_PICTURE_AVAILABLE
+        return UPDATE_PICTURE_UP_TO_DATE
+
+    @property
+    def icon(self) -> str:
+        """Fallback MDI icon for cards that override entity_picture."""
+        if self.in_progress:
+            return "mdi:progress-download"
+        if self._has_available_update():
+            return "mdi:package-up"
+        return "mdi:package-check"
+
     @property
     def available(self) -> bool:
         """Keep the update entity interactive across the brief OTA reboot window."""
@@ -108,6 +181,18 @@ class StuffyMeterFirmwareUpdate(StuffyMeterEntity, UpdateEntity):
                 return self._install_target
 
         return self.installed_version
+
+    @property
+    def release_summary(self) -> str | None:
+        """Return a short update summary displayed in the update dialog."""
+        if self._has_available_update() and self.latest_version:
+            if self.installed_version:
+                return (
+                    f"{self.latest_version} is available for update "
+                    f"(installed: {self.installed_version})."
+                )
+            return f"{self.latest_version} is available for update."
+        return None
 
     @property
     def release_url(self) -> str | None:

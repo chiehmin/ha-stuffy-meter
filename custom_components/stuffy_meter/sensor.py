@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover - Home Assistant < 2026.8
 from .const import DOMAIN
 from .coordinator import StuffyMeterCoordinator
 from .entity import StuffyMeterEntity
+from .update import UPDATE_PICTURE_AVAILABLE
 
 AIR_QUALITY_LEVELS = ["good", "moderate", "poor", "bad"]
 
@@ -46,6 +47,8 @@ class StuffyMeterSensorDescription(SensorEntityDescription):
     """Describe a Stuffy Meter sensor entity."""
 
     value_fn: Callable[[dict[str, Any]], Any]
+    icon_fn: Callable[[dict[str, Any]], str | None] | None = None
+    picture_fn: Callable[[dict[str, Any]], str | None] | None = None
 
 
 def _get(data: dict[str, Any], section: str, field: str) -> Any:
@@ -69,6 +72,39 @@ def _battery_value(data: dict[str, Any], field: str) -> Any:
     if power.get("battery_present") is False:
         return None
     return power.get(field)
+
+
+def _firmware_versions(data: dict[str, Any]) -> tuple[str | None, str | None]:
+    fw_raw = _get(data, "device", "fw_version")
+    avail_raw = _get(data, "ota", "available_version")
+    fw = fw_raw.strip() if isinstance(fw_raw, str) and fw_raw.strip() else None
+    avail = (
+        avail_raw.strip()
+        if isinstance(avail_raw, str) and avail_raw.strip()
+        else None
+    )
+    return fw, avail
+
+
+def _firmware_version_state(data: dict[str, Any]) -> str | None:
+    fw, avail = _firmware_versions(data)
+    if avail and avail != fw:
+        return f"{fw} → {avail}" if fw else avail
+    return fw
+
+
+def _firmware_version_icon(data: dict[str, Any]) -> str:
+    fw, avail = _firmware_versions(data)
+    if avail and avail != fw:
+        return "mdi:package-up"
+    return "mdi:package-check"
+
+
+def _firmware_version_picture(data: dict[str, Any]) -> str | None:
+    fw, avail = _firmware_versions(data)
+    if avail and avail != fw:
+        return UPDATE_PICTURE_AVAILABLE
+    return None
 
 
 BASE_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
@@ -158,6 +194,14 @@ BASE_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: _get(d, "device", "heap_free"),
     ),
+    StuffyMeterSensorDescription(
+        key="firmware_version",
+        translation_key="firmware_version",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_firmware_version_state,
+        icon_fn=_firmware_version_icon,
+        picture_fn=_firmware_version_picture,
+    ),
 )
 
 BATTERY_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
@@ -216,3 +260,17 @@ class StuffyMeterSensor(StuffyMeterEntity, SensorEntity):
         if not self.coordinator.data:
             return None
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def icon(self) -> str | None:
+        """Return dynamic icon when configured, otherwise the description icon."""
+        if self.entity_description.icon_fn and self.coordinator.data:
+            return self.entity_description.icon_fn(self.coordinator.data)
+        return self.entity_description.icon
+
+    @property
+    def entity_picture(self) -> str | None:
+        """Return dynamic entity picture when configured."""
+        if self.entity_description.picture_fn and self.coordinator.data:
+            return self.entity_description.picture_fn(self.coordinator.data)
+        return None

@@ -89,6 +89,9 @@
       },
       "battery_voltage": {
         "name": "Battery voltage"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
       }
     },
     "binary_sensor": {

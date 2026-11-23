@@ -89,6 +89,9 @@
       },
       "battery_voltage": {
         "name": "電池電壓"
+      },
+      "firmware_version": {
+        "name": "韌體版本"
       }
     },
     "binary_sensor": {
