@@ -14,7 +14,6 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    CONCENTRATION_PARTS_PER_MILLION,
     EntityCategory,
     PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
@@ -25,6 +24,15 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+
+try:
+    from homeassistant.const import UnitOfRatio
+
+    PPM_UNIT: str = UnitOfRatio.PARTS_PER_MILLION
+except ImportError:  # pragma: no cover - Home Assistant < 2026.8
+    from homeassistant.const import CONCENTRATION_PARTS_PER_MILLION
+
+    PPM_UNIT = CONCENTRATION_PARTS_PER_MILLION
 
 from .const import DOMAIN
 from .coordinator import StuffyMeterCoordinator
@@ -54,11 +62,20 @@ def _air_quality_level(data: dict[str, Any]) -> str | None:
     return None
 
 
+def _battery_value(data: dict[str, Any], field: str) -> Any:
+    power = data.get("power")
+    if not isinstance(power, dict):
+        return None
+    if power.get("battery_present") is False:
+        return None
+    return power.get(field)
+
+
 BASE_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
     StuffyMeterSensorDescription(
         key="co2",
-        device_class=SensorDeviceClass.CARBON_DIOXIDE,
-        native_unit_of_measurement=CONCENTRATION_PARTS_PER_MILLION,
+        device_class=SensorDeviceClass.CO2,
+        native_unit_of_measurement=PPM_UNIT,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=0,
         value_fn=lambda d: _get(d, "readings", "co2_ppm"),
@@ -150,7 +167,7 @@ BATTERY_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=0,
-        value_fn=lambda d: _get(d, "power", "battery_pct"),
+        value_fn=lambda d: _battery_value(d, "battery_pct"),
     ),
     StuffyMeterSensorDescription(
         key="battery_voltage",
@@ -160,7 +177,7 @@ BATTERY_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=2,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: _get(d, "power", "battery_v"),
+        value_fn=lambda d: _battery_value(d, "battery_v"),
     ),
 )
 

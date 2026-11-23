@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -27,13 +28,13 @@ class StuffyMeterInvalidResponseError(StuffyMeterError):
 
 
 def normalize_host(host: str) -> str:
-    """Strip scheme and trailing slash from a user-provided host or IP."""
+    """Strip scheme, path, query, and trailing slash from a user-provided host or IP."""
     cleaned = host.strip()
-    for prefix in ("http://", "https://"):
-        if cleaned.lower().startswith(prefix):
-            cleaned = cleaned[len(prefix) :]
-            break
-    return cleaned.rstrip("/")
+    if "://" in cleaned:
+        parsed = urlsplit(cleaned)
+        if parsed.netloc:
+            return parsed.netloc
+    return cleaned.split("/", 1)[0].strip()
 
 
 class StuffyMeterClient:

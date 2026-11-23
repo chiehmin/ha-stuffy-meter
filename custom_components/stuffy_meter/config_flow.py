@@ -15,6 +15,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 try:
@@ -39,6 +40,10 @@ from .const import (
 from .coordinator import extract_device_name
 
 _LOGGER = logging.getLogger(__name__)
+
+PASSWORD_SELECTOR = selector.TextSelector(
+    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+)
 
 
 async def _validate_monitor(
@@ -98,7 +103,7 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
             password = user_input.get(CONF_PASSWORD, "")
             status, errors = await _validate_monitor(self.hass, host, password)
             if not errors:
-                dev_id = str(status["device"]["id"])
+                dev_id = str(status["device"]["id"]).strip().lower()
                 await self.async_set_unique_id(dev_id)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
@@ -118,7 +123,7 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Optional(
                     CONF_PASSWORD,
                     default=(user_input or {}).get(CONF_PASSWORD, ""),
-                ): str,
+                ): PASSWORD_SELECTOR,
             }
         )
         return self.async_show_form(
@@ -132,19 +137,23 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
         discovery_info: ZeroconfServiceInfo,
     ) -> ConfigFlowResult:
         """Handle automatic mDNS discovery (_stuffymeter._tcp / _smartaq._tcp)."""
+        if discovery_info.ip_address.version != 4:
+            return self.async_abort(reason="cannot_connect")
         host = discovery_info.host
+        if discovery_info.port and discovery_info.port != 80:
+            host = f"{host}:{discovery_info.port}"
         props = discovery_info.properties or {}
         txt_id = props.get("id")
 
         if txt_id:
-            await self.async_set_unique_id(str(txt_id))
+            await self.async_set_unique_id(str(txt_id).strip().lower())
             self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
         status, errors = await _validate_monitor(self.hass, host)
         if errors:
             return self.async_abort(reason=errors["base"])
 
-        dev_id = str(status["device"]["id"])
+        dev_id = str(status["device"]["id"]).strip().lower()
         await self.async_set_unique_id(dev_id)
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
@@ -187,7 +196,7 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Optional(
                     CONF_PASSWORD,
                     default=(user_input or {}).get(CONF_PASSWORD, ""),
-                ): str,
+                ): PASSWORD_SELECTOR,
             }
         )
         return self.async_show_form(
@@ -213,9 +222,12 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
             password = user_input.get(CONF_PASSWORD, "")
             status, errors = await _validate_monitor(self.hass, host, password)
             if not errors:
-                dev_id = str(status["device"]["id"])
+                dev_id = str(status["device"]["id"]).strip().lower()
                 await self.async_set_unique_id(dev_id)
                 self._abort_if_unique_id_mismatch()
+                new_options = {
+                    k: v for k, v in entry.options.items() if k != CONF_PASSWORD
+                }
                 return self.async_update_reload_and_abort(
                     entry,
                     title=extract_device_name(status),
@@ -223,6 +235,7 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_HOST: host,
                         CONF_PASSWORD: password,
                     },
+                    options=new_options,
                 )
 
         schema = vol.Schema(
@@ -239,7 +252,7 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_PASSWORD, entry.data.get(CONF_PASSWORD, "")
                         ),
                     ),
-                ): str,
+                ): PASSWORD_SELECTOR,
             }
         )
         return self.async_show_form(
@@ -298,7 +311,7 @@ class StuffyMeterOptionsFlow(OptionsFlow):
                 vol.Optional(
                     CONF_PASSWORD,
                     default=(user_input or {}).get(CONF_PASSWORD, current_password),
-                ): str,
+                ): PASSWORD_SELECTOR,
             }
         )
         return self.async_show_form(

@@ -67,6 +67,15 @@ class TestPackagingAndTranslations(unittest.TestCase):
         for py in sorted(COMP.glob("*.py")):
             ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
 
+    def test_modern_ha_api_constants(self) -> None:
+        sensor_src = (COMP / "sensor.py").read_text(encoding="utf-8")
+        self.assertIn("SensorDeviceClass.CO2", sensor_src)
+        self.assertNotIn("SensorDeviceClass.CARBON_DIOXIDE", sensor_src)
+        self.assertIn("UnitOfRatio.PARTS_PER_MILLION", sensor_src)
+
+        coord_src = (COMP / "coordinator.py").read_text(encoding="utf-8")
+        self.assertIn("async_get_device_by_identifier", coord_src)
+
 
 class TestApiClient(unittest.TestCase):
     """Test StuffyMeterClient against an in-process aiohttp server."""
@@ -87,6 +96,9 @@ class TestApiClient(unittest.TestCase):
         api = _load_module("custom_components.stuffy_meter.api", COMP / "api.py")
 
         self.assertEqual(api.normalize_host("http://192.168.1.42/"), "192.168.1.42")
+        self.assertEqual(
+            api.normalize_host("http://192.168.1.42/#dashboard"), "192.168.1.42"
+        )
         self.assertEqual(
             api.normalize_host("  stuffymeter-a1b2c3.local/  "),
             "stuffymeter-a1b2c3.local",

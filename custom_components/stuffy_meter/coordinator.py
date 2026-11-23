@@ -57,6 +57,7 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=entry,
             name=f"{DOMAIN}_{entry.unique_id or entry.data[CONF_HOST]}",
             update_interval=timedelta(seconds=int(scan_interval)),
         )
@@ -109,7 +110,13 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_sw_version = new_sw
 
         dev_reg = dr.async_get(self.hass)
-        dev_entry = dev_reg.async_get_device(identifiers={(DOMAIN, str(dev_id))})
+        if hasattr(dev_reg, "async_get_device_by_identifier"):
+            dev_entry = dev_reg.async_get_device_by_identifier(
+                (DOMAIN, str(dev_id)),
+                self.entry.entry_id,
+            )
+        else:  # pragma: no cover - Home Assistant < 2026.8
+            dev_entry = dev_reg.async_get_device(identifiers={(DOMAIN, str(dev_id))})
         if dev_entry is None:
             return
 
