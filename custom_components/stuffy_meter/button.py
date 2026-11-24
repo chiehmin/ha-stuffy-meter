@@ -10,7 +10,6 @@ from homeassistant.components.button import (
     ButtonEntity,
     ButtonEntityDescription,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -18,7 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api import StuffyMeterAuthError, StuffyMeterError
 from .const import DOMAIN
-from .coordinator import StuffyMeterCoordinator
+from .coordinator import StuffyMeterConfigEntry, StuffyMeterCoordinator
 from .entity import StuffyMeterEntity
 
 
@@ -54,11 +53,11 @@ BUTTONS: tuple[StuffyMeterButtonDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: StuffyMeterConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Stuffy Meter button entities."""
-    coordinator: StuffyMeterCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     async_add_entities(
         StuffyMeterButton(coordinator, desc) for desc in BUTTONS
     )
@@ -82,8 +81,21 @@ class StuffyMeterButton(StuffyMeterEntity, ButtonEntity):
         try:
             await self.entity_description.press_fn(self.coordinator)
         except StuffyMeterAuthError as err:
+            if (
+                self.coordinator.hass is not None
+                and hasattr(self.coordinator.entry, "async_start_reauth")
+            ):
+                self.coordinator.entry.async_start_reauth(self.coordinator.hass)
             raise HomeAssistantError(
-                "Admin password is required for this action; set it in Stuffy Meter integration options."
+                "Admin password is required for this action; "
+                "update it in Stuffy Meter integration options or reauthenticate.",
+                translation_domain=DOMAIN,
+                translation_key="auth_required",
             ) from err
         except StuffyMeterError as err:
-            raise HomeAssistantError(str(err)) from err
+            raise HomeAssistantError(
+                str(err),
+                translation_domain=DOMAIN,
+                translation_key="api_error",
+                translation_placeholders={"detail": str(err)},
+            ) from err

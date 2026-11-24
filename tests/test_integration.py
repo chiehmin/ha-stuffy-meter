@@ -68,26 +68,47 @@ class TestPackagingAndTranslations(unittest.TestCase):
             ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
 
     def test_modern_ha_api_constants(self) -> None:
+        manifest = json.loads((COMP / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["version"], "0.3.1")
+
         sensor_src = (COMP / "sensor.py").read_text(encoding="utf-8")
         self.assertIn("SensorDeviceClass.CO2", sensor_src)
         self.assertNotIn("SensorDeviceClass.CARBON_DIOXIDE", sensor_src)
         self.assertIn("UnitOfRatio.PARTS_PER_MILLION", sensor_src)
+        self.assertIn("SensorDeviceClass.ABSOLUTE_HUMIDITY", sensor_src)
+        self.assertIn("SensorDeviceClass.TIMESTAMP", sensor_src)
+        self.assertIn("_unrecorded_attributes", sensor_src)
+        self.assertIn("entry.runtime_data", sensor_src)
+        self.assertNotIn("hass.data[DOMAIN]", sensor_src)
 
         coord_src = (COMP / "coordinator.py").read_text(encoding="utf-8")
         self.assertIn("async_get_device_by_identifier", coord_src)
+        self.assertIn("StuffyMeterConfigEntry", coord_src)
+        self.assertIn("dt_util.get_default_time_zone", coord_src)
 
         init_src = (COMP / "__init__.py").read_text(encoding="utf-8")
         self.assertIn("Platform.UPDATE", init_src)
+        self.assertIn("entry.runtime_data = coordinator", init_src)
+        self.assertNotIn("hass.data", init_src)
 
         update_src = (COMP / "update.py").read_text(encoding="utf-8")
         self.assertIn("UpdateDeviceClass.FIRMWARE", update_src)
         self.assertIn("UpdateEntityFeature.INSTALL", update_src)
         self.assertIn("UpdateEntityFeature.PROGRESS", update_src)
         self.assertIn("def update_percentage", update_src)
+        self.assertIn("entry.runtime_data", update_src)
+        self.assertNotIn("hass.data[DOMAIN]", update_src)
+
+        for plat in ("binary_sensor.py", "button.py"):
+            src = (COMP / plat).read_text(encoding="utf-8")
+            self.assertIn("entry.runtime_data", src)
+            self.assertNotIn("hass.data[DOMAIN]", src)
 
 
 def _install_ha_stubs() -> dict[str, Any]:
     """Install minimal homeassistant module stubs so integration modules can be unit-tested."""
+    from dataclasses import dataclass
+    from datetime import datetime, timezone
     from enum import IntFlag, StrEnum
     import types
     from unittest.mock import MagicMock
@@ -121,8 +142,57 @@ def _install_ha_stubs() -> dict[str, Any]:
             aio_mod.ClientTimeout = _ClientTimeout
             aio_mod.ClientSession = object
 
+    if "voluptuous" not in sys.modules:
+        try:
+            import voluptuous  # noqa: F401
+        except ImportError:
+            vol_mod = _register("voluptuous", types.ModuleType("voluptuous"))
+
+            _UNDEF = object()
+
+            class _Marker:
+                def __init__(self, schema, default=_UNDEF):
+                    self.schema = schema
+                    self.default = default
+
+                def __hash__(self):
+                    return hash((type(self).__name__, self.schema))
+
+                def __eq__(self, other):
+                    return type(self) is type(other) and self.schema == other.schema
+
+            class _Required(_Marker):
+                pass
+
+            class _Optional(_Marker):
+                pass
+
+            class _Schema:
+                def __init__(self, schema):
+                    self.schema = schema
+
+                def __call__(self, data):
+                    return data
+
+            vol_mod.UNDEFINED = _UNDEF
+            vol_mod.Required = _Required
+            vol_mod.Optional = _Optional
+            vol_mod.Schema = _Schema
+            vol_mod.All = lambda *validators: validators
+            vol_mod.Coerce = lambda typ: typ
+            vol_mod.Range = lambda **kwargs: kwargs
+
     ha = _register("homeassistant", types.ModuleType("homeassistant"))
     ha.__path__ = []  # type: ignore[attr-defined]
+
+    # homeassistant.util / homeassistant.util.dt
+    util_mod = _register("homeassistant.util", types.ModuleType("homeassistant.util"))
+    util_mod.__path__ = []  # type: ignore[attr-defined]
+    dt_mod = _register("homeassistant.util.dt", types.ModuleType("homeassistant.util.dt"))
+    dt_mod.DEFAULT_TIME_ZONE = timezone.utc
+    dt_mod.get_default_time_zone = lambda: dt_mod.DEFAULT_TIME_ZONE
+    dt_mod.utcnow = lambda: datetime.now(timezone.utc)
+    util_mod.dt = dt_mod
 
     # homeassistant.const
     const_mod = _register("homeassistant.const", types.ModuleType("homeassistant.const"))
@@ -168,13 +238,114 @@ def _install_ha_stubs() -> dict[str, Any]:
     # homeassistant.core
     core_mod = _register("homeassistant.core", types.ModuleType("homeassistant.core"))
     core_mod.HomeAssistant = object
+    core_mod.callback = lambda fn: fn
 
     # homeassistant.config_entries
     ce_mod = _register(
         "homeassistant.config_entries",
         types.ModuleType("homeassistant.config_entries"),
     )
-    ce_mod.ConfigEntry = object
+
+    class ConfigEntry:
+        def __class_getitem__(cls, _item):
+            return cls
+
+    class AbortFlow(Exception):
+        def __init__(self, reason: str) -> None:
+            super().__init__(reason)
+            self.reason = reason
+
+    class ConfigFlow:
+        def __init_subclass__(cls, *, domain: str | None = None, **kwargs):
+            super().__init_subclass__(**kwargs)
+            cls.domain = domain
+
+        def __init__(self) -> None:
+            self.hass = None
+            self.context: dict = {}
+            self._unique_id: str | None = None
+
+        async def async_set_unique_id(self, unique_id: str | None) -> None:
+            self._unique_id = unique_id
+
+        def _async_current_entries(self):
+            return []
+
+        def _abort_if_unique_id_configured(self, *, updates=None):
+            for entry in self._async_current_entries():
+                if entry.unique_id == self._unique_id:
+                    if updates is not None:
+                        entry.data = {**entry.data, **updates}
+                    raise AbortFlow("already_configured")
+
+        def _abort_if_unique_id_mismatch(self):
+            entry = self._get_reconfigure_entry()
+            if entry.unique_id and self._unique_id != entry.unique_id:
+                raise AbortFlow("unique_id_mismatch")
+
+        def async_abort(self, *, reason: str):
+            return {"type": "abort", "reason": reason}
+
+        def async_show_form(
+            self,
+            *,
+            step_id: str,
+            data_schema=None,
+            errors=None,
+            description_placeholders=None,
+        ):
+            return {
+                "type": "form",
+                "step_id": step_id,
+                "data_schema": data_schema,
+                "errors": errors or {},
+                "description_placeholders": description_placeholders or {},
+            }
+
+        def async_create_entry(self, *, title: str, data: dict):
+            return {"type": "create_entry", "title": title, "data": data}
+
+        def async_update_reload_and_abort(
+            self,
+            entry,
+            *,
+            title=None,
+            data_updates=None,
+            options=None,
+        ):
+            if data_updates:
+                entry.data = {**entry.data, **data_updates}
+            if options is not None:
+                entry.options = dict(options)
+            if title is not None:
+                entry.title = title
+            return {
+                "type": "abort",
+                "reason": "updated",
+                "entry": entry,
+            }
+
+    class OptionsFlow:
+        def __init__(self) -> None:
+            self.hass = None
+            self.config_entry = None
+
+        def async_show_form(self, *, step_id: str, data_schema=None, errors=None):
+            return {
+                "type": "form",
+                "step_id": step_id,
+                "data_schema": data_schema,
+                "errors": errors or {},
+            }
+
+        def async_create_entry(self, *, title: str, data: dict):
+            return {"type": "create_entry", "title": title, "data": data}
+
+    ce_mod.ConfigEntry = ConfigEntry
+    ce_mod.ConfigFlow = ConfigFlow
+    ce_mod.ConfigFlowResult = dict
+    ce_mod.OptionsFlow = OptionsFlow
+    ce_mod.AbortFlow = AbortFlow
 
     # homeassistant.exceptions
     exc_mod = _register(
@@ -183,13 +354,61 @@ def _install_ha_stubs() -> dict[str, Any]:
     )
 
     class HomeAssistantError(Exception):
-        pass
+        def __init__(
+            self,
+            *args: object,
+            translation_domain: str | None = None,
+            translation_key: str | None = None,
+            translation_placeholders: dict[str, str] | None = None,
+        ) -> None:
+            super().__init__(*args)
+            self.translation_domain = translation_domain
+            self.translation_key = translation_key
+            self.translation_placeholders = translation_placeholders
 
     exc_mod.HomeAssistantError = HomeAssistantError
 
     # homeassistant.helpers.*
     helpers = _register("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
     helpers.__path__ = []  # type: ignore[attr-defined]
+
+    aio_helper_mod = _register(
+        "homeassistant.helpers.aiohttp_client",
+        types.ModuleType("homeassistant.helpers.aiohttp_client"),
+    )
+    aio_helper_mod.async_get_clientsession = MagicMock()
+
+    sel_mod = _register(
+        "homeassistant.helpers.selector",
+        types.ModuleType("homeassistant.helpers.selector"),
+    )
+
+    class TextSelectorType(StrEnum):
+        PASSWORD = "password"
+
+    class TextSelectorConfig:
+        def __init__(self, *, type=None):
+            self.type = type
+
+    class TextSelector:
+        def __init__(self, config=None):
+            self.config = config
+
+    sel_mod.TextSelector = TextSelector
+    sel_mod.TextSelectorConfig = TextSelectorConfig
+    sel_mod.TextSelectorType = TextSelectorType
+    helpers.selector = sel_mod
+
+    si_mod = _register(
+        "homeassistant.helpers.service_info",
+        types.ModuleType("homeassistant.helpers.service_info"),
+    )
+    si_mod.__path__ = []  # type: ignore[attr-defined]
+    zc_si_mod = _register(
+        "homeassistant.helpers.service_info.zeroconf",
+        types.ModuleType("homeassistant.helpers.service_info.zeroconf"),
+    )
+    zc_si_mod.ZeroconfServiceInfo = object
 
     dr_mod = _register(
         "homeassistant.helpers.device_registry",
@@ -232,6 +451,9 @@ def _install_ha_stubs() -> dict[str, Any]:
             self.data = None
             self.last_update_success = True
             self._listeners: list = []
+
+        async def async_config_entry_first_refresh(self):
+            await self.async_refresh()
 
         async def async_refresh(self):
             try:
@@ -323,8 +545,6 @@ def _install_ha_stubs() -> dict[str, Any]:
         IDENTIFY = "identify"
         RESTART = "restart"
 
-    from dataclasses import dataclass
-
     @dataclass(frozen=True, kw_only=True)
     class ButtonEntityDescription:
         key: str
@@ -340,6 +560,30 @@ def _install_ha_stubs() -> dict[str, Any]:
     btn_mod.ButtonEntity = ButtonEntity
     btn_mod.ButtonEntityDescription = ButtonEntityDescription
 
+    bs_mod = _register(
+        "homeassistant.components.binary_sensor",
+        types.ModuleType("homeassistant.components.binary_sensor"),
+    )
+
+    class BinarySensorDeviceClass(StrEnum):
+        PLUG = "plug"
+        BATTERY_CHARGING = "battery_charging"
+
+    @dataclass(frozen=True, kw_only=True)
+    class BinarySensorEntityDescription:
+        key: str
+        translation_key: str | None = None
+        icon: str | None = None
+        device_class: BinarySensorDeviceClass | None = None
+        entity_category: EntityCategory | None = None
+
+    class BinarySensorEntity:
+        pass
+
+    bs_mod.BinarySensorDeviceClass = BinarySensorDeviceClass
+    bs_mod.BinarySensorEntity = BinarySensorEntity
+    bs_mod.BinarySensorEntityDescription = BinarySensorEntityDescription
+
     sens_mod = _register(
         "homeassistant.components.sensor",
         types.ModuleType("homeassistant.components.sensor"),
@@ -349,9 +593,11 @@ def _install_ha_stubs() -> dict[str, Any]:
         CO2 = "carbon_dioxide"
         TEMPERATURE = "temperature"
         HUMIDITY = "humidity"
+        ABSOLUTE_HUMIDITY = "absolute_humidity"
         ENUM = "enum"
         SIGNAL_STRENGTH = "signal_strength"
         DURATION = "duration"
+        TIMESTAMP = "timestamp"
         DATA_SIZE = "data_size"
         BATTERY = "battery"
         VOLTAGE = "voltage"
@@ -371,6 +617,7 @@ def _install_ha_stubs() -> dict[str, Any]:
         suggested_display_precision: int | None = None
         options: list[str] | None = None
         entity_category: EntityCategory | None = None
+        entity_registry_enabled_default: bool = True
 
     class SensorEntity:
         pass
@@ -392,7 +639,96 @@ def _restore_modules(saved: dict[str, Any]) -> None:
 
 
 class TestApiClient(unittest.TestCase):
-    """Test StuffyMeterClient against an in-process aiohttp server."""
+    """Test StuffyMeterClient against an in-process aiohttp server and stubs."""
+
+    def test_normalize_host_and_stubbed_history_config(self) -> None:
+        saved = _install_ha_stubs()
+        try:
+            pkg = type(sys)("custom_components.stuffy_meter")
+            pkg.__path__ = [str(COMP)]
+            sys.modules.setdefault("custom_components", type(sys)("custom_components"))
+            sys.modules["custom_components.stuffy_meter"] = pkg
+            _load_module("custom_components.stuffy_meter.const", COMP / "const.py")
+            api = _load_module("custom_components.stuffy_meter.api", COMP / "api.py")
+
+            # normalize_host strips scheme, path, query, fragment, whitespace
+            self.assertEqual(api.normalize_host("http://192.168.1.42/"), "192.168.1.42")
+            self.assertEqual(
+                api.normalize_host("http://192.168.1.42/#dashboard"), "192.168.1.42"
+            )
+            self.assertEqual(
+                api.normalize_host("192.168.1.42?foo=bar"), "192.168.1.42"
+            )
+            self.assertEqual(
+                api.normalize_host("192.168.1.42#settings"), "192.168.1.42"
+            )
+            self.assertEqual(
+                api.normalize_host("192.168.1.42:8080?x=1#y"), "192.168.1.42:8080"
+            )
+            self.assertEqual(
+                api.normalize_host("  stuffymeter-a1b2c3.local/  "),
+                "stuffymeter-a1b2c3.local",
+            )
+            self.assertEqual(
+                api.normalize_host("stuffymeter-a1b2c3.local#dashboard"),
+                "stuffymeter-a1b2c3.local",
+            )
+
+            # Stubbed session for async_get_history & async_get_config
+            calls: list[tuple[str, str, dict | None, float | None]] = []
+
+            class _FakeResp:
+                def __init__(self, status: int, payload: dict) -> None:
+                    self.status = status
+                    self._payload = payload
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *args):
+                    return False
+
+                async def json(self, content_type=None):
+                    return self._payload
+
+            class _FakeSession:
+                def request(self, method, url, json=None, headers=None, timeout=None):
+                    calls.append((method, url, headers, getattr(timeout, "total", None)))
+                    if "/api/history" in url:
+                        return _FakeResp(200, {"step_s": 60, "co2_ppm": [500, 510]})
+                    if "/api/config" in url:
+                        if not headers or not headers.get("Authorization"):
+                            return _FakeResp(401, {"ok": False})
+                        return _FakeResp(200, {"co2_t1": 800, "co2_t2": 1200})
+                    return _FakeResp(404, {"error": "not found"})
+
+            async def run() -> None:
+                client = api.StuffyMeterClient(
+                    _FakeSession(), "192.168.1.42?ignored=1", password="secret"
+                )
+                hist = await client.async_get_history(minutes=60, step=1)
+                self.assertEqual(hist["co2_ppm"], [500, 510])
+                self.assertEqual(
+                    calls[-1][1], "http://192.168.1.42/api/history?minutes=60&step=1"
+                )
+                self.assertIsNone(calls[-1][2])
+                self.assertEqual(calls[-1][3], 12)
+
+                cfg = await client.async_get_config()
+                self.assertEqual(cfg["co2_t2"], 1200)
+                self.assertEqual(calls[-1][1], "http://192.168.1.42/api/config")
+                self.assertIn("Authorization", calls[-1][2])
+
+                pub = api.StuffyMeterClient(_FakeSession(), "192.168.1.42")
+                with self.assertRaises(api.StuffyMeterAuthError):
+                    await pub.async_get_config()
+
+            asyncio.run(run())
+        finally:
+            for mod_name in list(sys.modules):
+                if mod_name.startswith("custom_components.stuffy_meter"):
+                    sys.modules.pop(mod_name, None)
+            _restore_modules(saved)
 
     def test_client_endpoints(self) -> None:
         try:
@@ -1045,6 +1381,166 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
         self.assertIsNone(upd.entity_picture)
         self.assertEqual(upd.icon, "mdi:progress-download")
 
+    def test_concurrent_install_guard_and_idle_since_long_ota(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+        from homeassistant.exceptions import HomeAssistantError
+        from homeassistant.helpers import device_registry as dr
+
+        dr.async_get.return_value = MagicMock(
+            async_get_device_by_identifier=MagicMock(return_value=None)
+        )
+
+        client = MagicMock()
+        client.host = "192.168.1.42"
+        client.has_password = True
+        client.async_get_history = AsyncMock(return_value={})
+        client.async_get_ota = AsyncMock(return_value={"auto": {}})
+
+        coord = self.coord_mod.StuffyMeterCoordinator(object(), self._make_entry(), client)
+        coord.data = self._make_status(available_version="1.10.3")
+        entity = self.update_mod.StuffyMeterFirmwareUpdate(coord)
+
+        async def run() -> None:
+            # 1. Concurrent async_install raises immediately WITHOUT wiping active state
+            gate = asyncio.Event()
+            started_evt = asyncio.Event()
+
+            async def slow_check_ota(install=True):
+                started_evt.set()
+                await gate.wait()
+                return {
+                    "ok": True,
+                    "update": True,
+                    "installing": True,
+                    "available": "1.10.3",
+                }
+
+            client.async_check_ota = AsyncMock(side_effect=slow_check_ota)
+            client.async_get_status = AsyncMock(
+                return_value=self._make_status(
+                    fw_version="1.10.3", boot_count=5, uptime_s=5
+                )
+            )
+
+            task1 = asyncio.create_task(entity.async_install(version=None, backup=False))
+            await started_evt.wait()
+            self.assertTrue(entity.in_progress)
+            self.assertEqual(entity._install_percentage, 0)
+            self.assertEqual(entity._install_target, "1.10.3")
+
+            with self.assertRaises(HomeAssistantError) as ctx:
+                await entity.async_install(version=None, backup=False)
+            self.assertEqual(ctx.exception.translation_domain, "stuffy_meter")
+            self.assertEqual(ctx.exception.translation_key, "ota_already_in_progress")
+
+            # Active install state MUST still be intact after duplicate call rejected
+            self.assertTrue(entity._install_in_progress)
+            self.assertEqual(entity._install_percentage, 0)
+            self.assertEqual(entity._install_target, "1.10.3")
+
+            gate.set()
+            await task1
+            self.assertEqual(entity.installed_version, "1.10.3")
+            self.assertFalse(entity.in_progress)
+
+            # 2. Long OTA (> OTA_INSTALL_START_GRACE) with transient idle poll succeeds
+            coord.data = self._make_status(
+                fw_version="1.10.3", boot_count=5, available_version="1.10.4"
+            )
+            client.async_check_ota = AsyncMock(
+                return_value={
+                    "ok": True,
+                    "update": True,
+                    "installing": True,
+                    "available": "1.10.4",
+                }
+            )
+            # 8 downloading polls (~0.08s > 0.05s grace), then 1 transient idle poll,
+            # then reboot disconnect, then new fw boots!
+            long_steps = iter(
+                [
+                    self._make_status(
+                        fw_version="1.10.3",
+                        boot_count=5,
+                        ota_state="downloading",
+                        progress=min(95, 10 * (i + 1)),
+                        available_version="1.10.4",
+                    )
+                    for i in range(8)
+                ]
+                + [
+                    self._make_status(
+                        fw_version="1.10.3",
+                        boot_count=5,
+                        ota_state="idle",
+                        progress=0,
+                        available_version="1.10.4",
+                    ),
+                    self.api.StuffyMeterConnectionError("rebooting"),
+                    self._make_status(
+                        fw_version="1.10.4",
+                        boot_count=6,
+                        uptime_s=4,
+                        ota_state="idle",
+                    ),
+                ]
+            )
+
+            async def fake_long_status():
+                nxt = next(long_steps)
+                if isinstance(nxt, Exception):
+                    raise nxt
+                return nxt
+
+            client.async_get_status = AsyncMock(side_effect=fake_long_status)
+            await entity.async_install(version=None, backup=False)
+            self.assertEqual(entity.installed_version, "1.10.4")
+            self.assertFalse(entity.in_progress)
+
+            # 3. Sustained idle >= OTA_INSTALL_START_GRACE after active state DOES fail
+            coord.data = self._make_status(
+                fw_version="1.10.4", boot_count=6, available_version="1.10.5"
+            )
+            client.async_check_ota = AsyncMock(
+                return_value={
+                    "ok": True,
+                    "update": True,
+                    "installing": True,
+                    "available": "1.10.5",
+                }
+            )
+            aborted_steps = iter(
+                [
+                    self._make_status(
+                        fw_version="1.10.4",
+                        boot_count=6,
+                        ota_state="downloading",
+                        progress=30,
+                        available_version="1.10.5",
+                    )
+                ]
+            )
+
+            async def fake_aborted_status():
+                try:
+                    return next(aborted_steps)
+                except StopIteration:
+                    return self._make_status(
+                        fw_version="1.10.4",
+                        boot_count=6,
+                        ota_state="idle",
+                        available_version="1.10.5",
+                    )
+
+            client.async_get_status = AsyncMock(side_effect=fake_aborted_status)
+            with self.assertRaises(HomeAssistantError) as ctx:
+                await entity.async_install(version=None, backup=False)
+            self.assertEqual(ctx.exception.translation_key, "ota_stopped_unexpectedly")
+            self.assertIn("stopped unexpectedly", str(ctx.exception))
+            self.assertFalse(entity.in_progress)
+
+        asyncio.run(run())
+
 
 
 class TestInsights(unittest.TestCase):
@@ -1239,6 +1735,577 @@ class TestInsights(unittest.TestCase):
             self.assertTrue(coord.last_update_success)
 
         asyncio.run(run())
+
+    def test_calc_week_explicit_tz_and_coordinator_tz(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from homeassistant.util import dt as dt_util
+
+        # 2026-06-01 22:00:00 UTC is 2026-06-02 06:00 in UTC+8 and 2026-06-01 18:00 in UTC-4
+        end_ts = int(datetime(2026, 6, 1, 22, 0, 0, tzinfo=timezone.utc).timestamp())
+        hist_7d = {
+            "step_s": 1800,
+            "end": end_ts,
+            "co2_ppm": [500, 600, 700],
+        }
+        wk_plus8 = self.insights.calc_week(hist_7d, tz=timezone(timedelta(hours=8)))
+        wk_minus4 = self.insights.calc_week(hist_7d, tz=timezone(timedelta(hours=-4)))
+        self.assertEqual(wk_plus8["daily_breakdown"][0]["date"], "2026-06-02")
+        self.assertEqual(wk_minus4["daily_breakdown"][0]["date"], "2026-06-01")
+
+        # Verify coordinator passes dt_util.get_default_time_zone() to compute_insights
+        prev_tz = dt_util.DEFAULT_TIME_ZONE
+        try:
+            dt_util.DEFAULT_TIME_ZONE = timezone(timedelta(hours=8))
+            client = SimpleNamespace(
+                host="192.168.1.42",
+                has_password=False,
+                async_get_status=AsyncMock(
+                    return_value={
+                        "device": {"id": "a1b2c3", "fw_version": "2.1.2"},
+                        "readings": {"co2_ppm": 650},
+                    }
+                ),
+                async_get_ota=AsyncMock(return_value={"auto": {"last_result": "up_to_date"}}),
+                async_get_history=AsyncMock(
+                    side_effect=lambda *, minutes, step: hist_7d if minutes > 60 else {}
+                ),
+            )
+            entry = SimpleNamespace(
+                entry_id="e-tz", unique_id="a1b2c3", data={"host": "192.168.1.42"}, options={}
+            )
+            coord = self.coord_mod.StuffyMeterCoordinator(object(), entry, client)
+            asyncio.run(coord.async_refresh())
+            self.assertEqual(
+                coord.insights["week"]["daily_breakdown"][0]["date"], "2026-06-02"
+            )
+        finally:
+            dt_util.DEFAULT_TIME_ZONE = prev_tz
+
+    def test_calc_vent_staleness_and_above_t2(self) -> None:
+        rising_hist = {
+            "step_s": 60,
+            "end": 1763900000,
+            "co2_ppm": [1100 + i * 5 for i in range(31)],
+        }
+        # Fresh history (300 s old <= 600 s) with cur >= t2 (1300 >= 1200)
+        res_fresh = self.insights.calc_vent(
+            rising_hist, 1300, (800, 1200, 1600), 100, now_ts=1763900300
+        )
+        self.assertIsNotNone(res_fresh)
+        self.assertEqual(res_fresh["state"], "rising")
+        self.assertEqual(res_fresh["action"], "ventilate_now")
+        self.assertEqual(res_fresh["level"], "bad")
+        self.assertIsNone(res_fresh["eta_minutes"])
+        self.assertIsNone(res_fresh["target_ppm"])
+
+        # Stale history (601 s old > 600 s) rejected when VOC is normal
+        res_stale = self.insights.calc_vent(
+            rising_hist, 1300, (800, 1200, 1600), 100, now_ts=1763900601
+        )
+        self.assertIsNone(res_stale)
+
+        # Stale history still surfaces high_voc when live VOC is poor/bad
+        res_stale_voc = self.insights.calc_vent(
+            rising_hist, 600, (800, 1200, 1600), 320, now_ts=1763900900
+        )
+        self.assertEqual(res_stale_voc["state"], "high_voc")
+        self.assertEqual(res_stale_voc["action"], "ventilate_now")
+
+        # Via compute_insights using status.device.unix_time
+        ins = self.insights.compute_insights(
+            {
+                "device": {"unix_time": 1763901000},
+                "readings": {"co2_ppm": 1300, "voc_index": 100},
+            },
+            rising_hist,
+            None,
+        )
+        self.assertIsNone(ins["vent"])
+
+    def test_recorder_db_bloat_and_uptime_timestamp(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from homeassistant.components.sensor import SensorDeviceClass
+        from homeassistant.util import dt as dt_util
+
+        self.assertEqual(
+            self.sensor_mod.StuffyMeterSensor._unrecorded_attributes,
+            frozenset({"daily_breakdown"}),
+        )
+
+        by_desc = {d.key: d for d in self.sensor_mod.BASE_SENSORS}
+        self.assertFalse(by_desc["heap_free"].entity_registry_enabled_default)
+        self.assertEqual(
+            by_desc["abs_humidity"].device_class,
+            SensorDeviceClass.ABSOLUTE_HUMIDITY,
+        )
+        self.assertEqual(by_desc["uptime"].device_class, SensorDeviceClass.TIMESTAMP)
+        self.assertIsNone(by_desc["uptime"].native_unit_of_measurement)
+        self.assertIsNone(by_desc["uptime"].state_class)
+
+        # Verify volatile duplicated attributes are omitted from enum sensors
+        status = {
+            "device": {
+                "id": "a1b2c3",
+                "fw_version": "2.1.2",
+                "boot_count": 4,
+                "uptime_s": 3600,
+            },
+            "readings": {
+                "co2_ppm": 950,
+                "temperature_c": 28.0,
+                "humidity_rh": 73.0,
+                "dew_point_c": 22.8,
+                "voc_index": 290,
+            },
+        }
+        hist_1h = {"step_s": 60, "co2_ppm": [800 + i * 4 for i in range(31)]}
+        client = SimpleNamespace(
+            host="192.168.1.42",
+            has_password=False,
+            async_get_status=AsyncMock(return_value=status),
+            async_get_ota=AsyncMock(return_value={"auto": {"last_result": "up_to_date"}}),
+            async_get_history=AsyncMock(
+                side_effect=lambda *, minutes, step: hist_1h if minutes == 60 else {}
+            ),
+        )
+        entry = SimpleNamespace(
+            entry_id="e-rec", unique_id="a1b2c3", data={"host": "192.168.1.42"}, options={}
+        )
+        coord = self.coord_mod.StuffyMeterCoordinator(object(), entry, client)
+
+        fixed_now = [datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)]
+        orig_utcnow = dt_util.utcnow
+        dt_util.utcnow = lambda: fixed_now[0]
+        try:
+            asyncio.run(coord.async_refresh())
+            vent_sensor = self.sensor_mod.StuffyMeterSensor(
+                coord, by_desc["ventilation_trend"]
+            )
+            comfort_sensor = self.sensor_mod.StuffyMeterSensor(
+                coord, by_desc["comfort_mold"]
+            )
+            uptime_sensor = self.sensor_mod.StuffyMeterSensor(coord, by_desc["uptime"])
+
+            v_attrs = vent_sensor.extra_state_attributes
+            self.assertNotIn("rate_ppm_per_h", v_attrs)
+            self.assertNotIn("voc_index", v_attrs)
+            self.assertIn("level", v_attrs)
+            self.assertIn("action", v_attrs)
+            self.assertIn("voc_level", v_attrs)
+
+            c_attrs = comfort_sensor.extra_state_attributes
+            self.assertEqual(set(c_attrs.keys()), {"level", "advice"})
+
+            # Uptime timestamp stays exact across normal polls (even with 2s jitter)
+            t_boot_1 = uptime_sensor.native_value
+            self.assertEqual(
+                t_boot_1, datetime(2026, 6, 1, 11, 0, 0, tzinfo=timezone.utc)
+            )
+            fixed_now[0] = datetime(2026, 6, 1, 12, 0, 17, tzinfo=timezone.utc)
+            coord.data = {
+                **status,
+                "device": {**status["device"], "uptime_s": 3615},
+            }
+            self.assertEqual(uptime_sensor.native_value, t_boot_1)
+
+            # Reboot (boot_count increments) updates boot timestamp
+            fixed_now[0] = datetime(2026, 6, 1, 12, 5, 0, tzinfo=timezone.utc)
+            coord.data = {
+                **status,
+                "device": {**status["device"], "boot_count": 5, "uptime_s": 10},
+            }
+            self.assertEqual(
+                uptime_sensor.native_value,
+                datetime(2026, 6, 1, 12, 4, 50, tzinfo=timezone.utc),
+            )
+
+            # Missing uptime_s returns None cleanly
+            coord.data = {"device": {"id": "a1b2c3"}}
+            self.assertIsNone(uptime_sensor.native_value)
+        finally:
+            dt_util.utcnow = orig_utcnow
+
+    def test_coordinator_retry_backoff_reauth_and_device_registry_sync(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+        from homeassistant.helpers import device_registry as dr
+
+        dev_reg = MagicMock()
+        dev_reg.async_get_device_by_identifier.return_value = None
+        dr.async_get.return_value = dev_reg
+
+        status = {
+            "device": {"id": "a1b2c3", "name": "Office", "fw_version": "2.1.2", "auth": True},
+            "readings": {"co2_ppm": 600},
+        }
+        client = SimpleNamespace(
+            host="192.168.1.42",
+            has_password=True,
+            async_get_status=AsyncMock(return_value=status),
+            async_get_ota=AsyncMock(return_value={"auto": {"last_result": "up_to_date"}}),
+            async_get_history=AsyncMock(
+                side_effect=self.api.StuffyMeterConnectionError("timeout")
+            ),
+            async_get_config=AsyncMock(
+                side_effect=self.api.StuffyMeterAuthError("HTTP 401")
+            ),
+        )
+        entry = SimpleNamespace(
+            entry_id="e-retry",
+            unique_id="a1b2c3",
+            data={"host": "192.168.1.42"},
+            options={},
+            async_start_reauth=MagicMock(),
+        )
+        hass = object()
+        coord = self.coord_mod.StuffyMeterCoordinator(hass, entry, client)
+
+        async def run() -> None:
+            await coord.async_refresh()
+            self.assertTrue(coord.last_update_success)
+            # Failed history_7d and config use 60 s retry backoff instead of 900s / 3600s
+            self.assertEqual(coord._history_7d_interval, self.const.INSIGHTS_RETRY_INTERVAL)
+            self.assertEqual(coord._config_interval, self.const.INSIGHTS_RETRY_INTERVAL)
+            # Auth error triggered reauth once without breaking polling
+            entry.async_start_reauth.assert_called_once_with(hass)
+            # dev_entry was None on first refresh, so _last_device_name must NOT be cached yet
+            self.assertIsNone(coord._last_device_name)
+
+            # Once device appears in registry with stale name/fw, next refresh updates it
+            dev_entry = SimpleNamespace(id="dev-9", name="Old Name", sw_version="2.0.0")
+            dev_reg.async_get_device_by_identifier.return_value = dev_entry
+            # Also simulate recovery of history/config
+            coord._history_7d_fetched_at = 0.0
+            coord._config_fetched_at = 0.0
+            client.async_get_history = AsyncMock(return_value={"step_s": 1800, "co2_ppm": [500, 600]})
+            client.async_get_config = AsyncMock(return_value={"co2_t2": 1200})
+            await coord.async_refresh()
+
+            dev_reg.async_update_device.assert_called_once_with(
+                "dev-9", name="Office", sw_version="2.1.2"
+            )
+            self.assertEqual(coord._last_device_name, "Office")
+            self.assertEqual(coord._history_7d_interval, self.const.HISTORY_7D_REFRESH_INTERVAL)
+            self.assertEqual(coord._config_interval, self.const.CONFIG_REFRESH_INTERVAL)
+
+        asyncio.run(run())
+
+
+class TestPlatformsAndConfigFlow(unittest.TestCase):
+    """Test entry.runtime_data setup, binary_sensor, and config/options/reauth flows."""
+
+    def setUp(self) -> None:
+        self._saved_mods = _install_ha_stubs()
+        pkg = type(sys)("custom_components.stuffy_meter")
+        pkg.__path__ = [str(COMP)]
+        sys.modules.setdefault("custom_components", type(sys)("custom_components"))
+        sys.modules["custom_components.stuffy_meter"] = pkg
+        self.const = _load_module("custom_components.stuffy_meter.const", COMP / "const.py")
+        self.api = _load_module("custom_components.stuffy_meter.api", COMP / "api.py")
+        self.insights = _load_module(
+            "custom_components.stuffy_meter.insights", COMP / "insights.py"
+        )
+        self.coord_mod = _load_module(
+            "custom_components.stuffy_meter.coordinator", COMP / "coordinator.py"
+        )
+        self.entity_mod = _load_module(
+            "custom_components.stuffy_meter.entity", COMP / "entity.py"
+        )
+        self.init_mod = _load_module(
+            "custom_components.stuffy_meter.__init__", COMP / "__init__.py"
+        )
+        self.sensor_mod = _load_module(
+            "custom_components.stuffy_meter.sensor", COMP / "sensor.py"
+        )
+        self.bs_mod = _load_module(
+            "custom_components.stuffy_meter.binary_sensor", COMP / "binary_sensor.py"
+        )
+        self.button_mod = _load_module(
+            "custom_components.stuffy_meter.button", COMP / "button.py"
+        )
+        self.update_mod = _load_module(
+            "custom_components.stuffy_meter.update", COMP / "update.py"
+        )
+        self.cf_mod = _load_module(
+            "custom_components.stuffy_meter.config_flow", COMP / "config_flow.py"
+        )
+
+    def tearDown(self) -> None:
+        for mod_name in list(sys.modules):
+            if mod_name.startswith("custom_components.stuffy_meter"):
+                sys.modules.pop(mod_name, None)
+        _restore_modules(self._saved_mods)
+
+    def test_runtime_data_setup_and_binary_sensors(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from homeassistant.helpers import device_registry as dr
+
+        dr.async_get.return_value = MagicMock(
+            async_get_device_by_identifier=MagicMock(return_value=None)
+        )
+
+        bat_status = {
+            "device": {"id": "bat001", "name": "Bedroom", "board": "4.1", "fw_version": "2.1.2"},
+            "readings": {"co2_ppm": 550},
+            "power": {"usb": True, "battery_present": True, "battery_pct": 92, "battery_v": 4.12, "charging": False},
+        }
+        usb_status = {
+            "device": {"id": "usb001", "name": "Desk", "board": "3.2", "fw_version": "2.1.2"},
+            "readings": {"co2_ppm": 610},
+        }
+
+        async def run() -> None:
+            hass = SimpleNamespace(
+                config_entries=SimpleNamespace(
+                    async_forward_entry_setups=AsyncMock(return_value=True),
+                    async_unload_platforms=AsyncMock(return_value=True),
+                    async_reload=AsyncMock(),
+                )
+            )
+            entry = SimpleNamespace(
+                entry_id="e-bat",
+                unique_id="bat001",
+                data={"host": "192.168.1.50", "password": ""},
+                options={},
+                runtime_data=None,
+                async_on_unload=MagicMock(),
+                add_update_listener=MagicMock(return_value=lambda: None),
+            )
+
+            with (
+                patch.object(self.api.StuffyMeterClient, "async_get_status", AsyncMock(return_value=bat_status)),
+                patch.object(self.api.StuffyMeterClient, "async_get_ota", AsyncMock(return_value={"auto": {}})),
+                patch.object(self.api.StuffyMeterClient, "async_get_history", AsyncMock(return_value={})),
+            ):
+                ok = await self.init_mod.async_setup_entry(hass, entry)
+                self.assertTrue(ok)
+                self.assertIsInstance(entry.runtime_data, self.coord_mod.StuffyMeterCoordinator)
+
+            # All 4 platforms load from entry.runtime_data
+            added_bs: list = []
+            await self.bs_mod.async_setup_entry(hass, entry, added_bs.extend)
+            self.assertEqual(len(added_bs), 2)
+            bs_by_key = {e.entity_description.key: e for e in added_bs}
+            self.assertTrue(bs_by_key["power"].is_on)
+            self.assertFalse(bs_by_key["battery_charging"].is_on)
+
+            added_sensors: list = []
+            await self.sensor_mod.async_setup_entry(hass, entry, added_sensors.extend)
+            self.assertEqual(
+                len(added_sensors),
+                len(self.sensor_mod.BASE_SENSORS) + len(self.sensor_mod.BATTERY_SENSORS),
+            )
+
+            added_btns: list = []
+            await self.button_mod.async_setup_entry(hass, entry, added_btns.extend)
+            self.assertEqual(len(added_btns), len(self.button_mod.BUTTONS))
+
+            added_upd: list = []
+            await self.update_mod.async_setup_entry(hass, entry, added_upd.extend)
+            self.assertEqual(len(added_upd), 1)
+
+            # USB edition adds zero binary sensors
+            entry.runtime_data.data = usb_status
+            added_usb_bs: list = []
+            await self.bs_mod.async_setup_entry(hass, entry, added_usb_bs.extend)
+            self.assertEqual(added_usb_bs, [])
+
+            # Unload returns True cleanly
+            self.assertTrue(await self.init_mod.async_unload_entry(hass, entry))
+
+        asyncio.run(run())
+
+    def test_config_flow_zeroconf_options_reconfigure_reauth(self) -> None:
+        import ipaddress
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from homeassistant.config_entries import AbortFlow
+        import voluptuous as vol
+
+        def _password_marker_has_default(schema) -> bool:
+            for marker in schema.schema:
+                if getattr(marker, "schema", None) == "password":
+                    return marker.default is not vol.UNDEFINED
+            return False
+
+        async def run() -> None:
+            # 1. Zeroconf: unreachable IP aborts BEFORE overwriting existing entry's CONF_HOST
+            existing_local = SimpleNamespace(
+                entry_id="e-local",
+                unique_id="a1b2c3",
+                title="Living Room",
+                data={"host": "stuffymeter-a1b2c3.local", "password": "oldpw"},
+                options={},
+            )
+            flow = self.cf_mod.StuffyMeterConfigFlow()
+            flow.hass = object()
+            flow._async_current_entries = lambda: [existing_local]
+
+            disc = SimpleNamespace(
+                ip_address=ipaddress.ip_address("192.168.1.99"),
+                host="192.168.1.99",
+                port=80,
+                properties={"id": "a1b2c3"},
+            )
+            with patch.object(
+                self.cf_mod,
+                "_validate_monitor",
+                AsyncMock(return_value=({}, {"base": "cannot_connect"})),
+            ):
+                res = await flow.async_step_zeroconf(disc)
+            self.assertEqual(res["type"], "abort")
+            self.assertEqual(res["reason"], "cannot_connect")
+            # Working .local host was NOT overwritten
+            self.assertEqual(existing_local.data["host"], "stuffymeter-a1b2c3.local")
+
+            # 2. Zeroconf: even when IP IS reachable, do NOT overwrite existing .local host
+            valid_status = {
+                "device": {"id": "a1b2c3", "name": "Living Room"},
+                "readings": {"co2_ppm": 600},
+            }
+            with patch.object(
+                self.cf_mod,
+                "_validate_monitor",
+                AsyncMock(return_value=(valid_status, {})),
+            ):
+                with self.assertRaises(AbortFlow) as abort_ctx:
+                    await flow.async_step_zeroconf(disc)
+            self.assertEqual(abort_ctx.exception.reason, "already_configured")
+            self.assertEqual(existing_local.data["host"], "stuffymeter-a1b2c3.local")
+
+            # 3. Zeroconf: reachable IP DOES update existing IP-based entry
+            existing_ip = SimpleNamespace(
+                entry_id="e-ip",
+                unique_id="a1b2c3",
+                title="Living Room",
+                data={"host": "192.168.1.40", "password": "oldpw"},
+                options={},
+            )
+            flow._async_current_entries = lambda: [existing_ip]
+            with patch.object(
+                self.cf_mod,
+                "_validate_monitor",
+                AsyncMock(return_value=(valid_status, {})),
+            ):
+                with self.assertRaises(AbortFlow) as abort_ctx:
+                    await flow.async_step_zeroconf(disc)
+            self.assertEqual(abort_ctx.exception.reason, "already_configured")
+            self.assertEqual(existing_ip.data["host"], "192.168.1.99")
+
+            # 4. OptionsFlow: NEVER prefills plaintext password; stores new pw in entry.data
+            opt_entry = SimpleNamespace(
+                entry_id="e-opt",
+                unique_id="a1b2c3",
+                title="Living Room",
+                data={"host": "192.168.1.42", "password": "secret-password"},
+                options={"scan_interval": 15},
+            )
+            opt_flow = self.cf_mod.StuffyMeterOptionsFlow()
+            opt_flow.config_entry = opt_entry
+            updated_data_calls: list[dict] = []
+
+            def fake_update_entry(entry, *, data=None):
+                if data is not None:
+                    entry.data = dict(data)
+                    updated_data_calls.append(dict(data))
+
+            opt_flow.hass = SimpleNamespace(
+                config_entries=SimpleNamespace(async_update_entry=fake_update_entry)
+            )
+            form = await opt_flow.async_step_init(None)
+            self.assertEqual(form["type"], "form")
+            self.assertFalse(_password_marker_has_default(form["data_schema"]))
+
+            # Blank password keeps existing entry.data password and stores only scan_interval in options
+            res = await opt_flow.async_step_init({"scan_interval": 30})
+            self.assertEqual(res["type"], "create_entry")
+            self.assertEqual(res["data"], {"scan_interval": 30})
+            self.assertNotIn("password", res["data"])
+            self.assertEqual(opt_entry.data["password"], "secret-password")
+
+            # Entering a new password validates and updates entry.data (NOT options)
+            with patch.object(
+                self.cf_mod,
+                "_validate_monitor",
+                AsyncMock(return_value=(valid_status, {})),
+            ) as mock_val:
+                res = await opt_flow.async_step_init(
+                    {"scan_interval": 20, "password": "new-password"}
+                )
+            mock_val.assert_awaited_once_with(
+                opt_flow.hass, "192.168.1.42", "new-password", require_auth=True
+            )
+            self.assertEqual(res["data"], {"scan_interval": 20})
+            self.assertEqual(opt_entry.data["password"], "new-password")
+
+            # 5. Reconfigure: NEVER prefills plaintext password; blank keeps existing password
+            rec_entry = SimpleNamespace(
+                entry_id="e-rec",
+                unique_id="a1b2c3",
+                title="Living Room",
+                data={"host": "192.168.1.42", "password": "kept-password"},
+                options={"scan_interval": 15},
+            )
+            flow._get_reconfigure_entry = lambda: rec_entry
+            rec_form = await flow.async_step_reconfigure(None)
+            self.assertFalse(_password_marker_has_default(rec_form["data_schema"]))
+
+            with patch.object(
+                self.cf_mod,
+                "_validate_monitor",
+                AsyncMock(return_value=(valid_status, {})),
+            ) as mock_val:
+                await flow.async_step_reconfigure({"host": "192.168.1.77"})
+            mock_val.assert_awaited_once_with(flow.hass, "192.168.1.77", "kept-password")
+            self.assertEqual(rec_entry.data["host"], "192.168.1.77")
+            self.assertEqual(rec_entry.data["password"], "kept-password")
+
+            # 6. Reauth flow: validates with require_auth=True, updates entry.data, strips legacy options password
+            reauth_entry = SimpleNamespace(
+                entry_id="e-reauth",
+                unique_id="a1b2c3",
+                title="Living Room",
+                data={"host": "192.168.1.42", "password": "stale"},
+                options={"scan_interval": 15, "password": "stale"},
+            )
+            flow._get_reauth_entry = lambda: reauth_entry
+            reauth_form = await flow.async_step_reauth(reauth_entry.data)
+            self.assertEqual(reauth_form["type"], "form")
+            self.assertEqual(reauth_form["step_id"], "reauth_confirm")
+            self.assertFalse(_password_marker_has_default(reauth_form["data_schema"]))
+
+            # Invalid auth shows error
+            with patch.object(
+                self.cf_mod,
+                "_validate_monitor",
+                AsyncMock(return_value=({}, {"base": "invalid_auth"})),
+            ):
+                bad_res = await flow.async_step_reauth_confirm({"password": "wrong"})
+            self.assertEqual(bad_res["type"], "form")
+            self.assertEqual(bad_res["errors"], {"base": "invalid_auth"})
+
+            # Valid new password updates entry.data and strips password from options
+            with patch.object(
+                self.cf_mod,
+                "_validate_monitor",
+                AsyncMock(return_value=(valid_status, {})),
+            ) as mock_val:
+                ok_res = await flow.async_step_reauth_confirm({"password": "fresh-pw"})
+            mock_val.assert_awaited_once_with(
+                flow.hass, "192.168.1.42", "fresh-pw", require_auth=True
+            )
+            self.assertEqual(ok_res["type"], "abort")
+            self.assertEqual(reauth_entry.data["password"], "fresh-pw")
+            self.assertNotIn("password", reauth_entry.options)
+            self.assertEqual(reauth_entry.options["scan_interval"], 15)
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,7 @@ directly and kept in parity with ``web/src/app.js`` (``calcVent``,
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 import math
 from typing import Any
 
@@ -81,12 +81,14 @@ def calc_vent(
     co2_thr: tuple[float, float, float] = DEFAULT_CO2_THRESHOLDS,
     voc_index: float | None = None,
     voc_thr: tuple[float, float, float] = DEFAULT_VOC_THRESHOLDS,
+    now_ts: float | None = None,
 ) -> dict[str, Any] | None:
     """Compute VOC-aware ventilation trend from 1-hour CO2 history and live VOC.
 
     Matches ``calcVent()`` in Stuffy Meter's ``web/src/app.js``:
     - Uses OLS linear regression over the most recent 30 minutes of 1h CO2 samples
       (requiring >= 10 valid samples spanning >= 15 min, latest sample <= 10 min old).
+    - Rejects stale 1h history when ``history_1h["end"]`` is >600 s older than ``now_ts``.
     - Escalates severity and action when live VOC index is elevated/high, and
       still surfaces ``high_voc`` before 15 minutes of CO2 history accumulate.
     """
@@ -94,6 +96,15 @@ def calc_vent(
     voc_val = _js_round(float(voc_index)) if has_voc else None
     voc_level = threshold_level(voc_val, voc_thr) if voc_val is not None else "good"
     voc_high = voc_level in ("poor", "bad")
+
+    raw_end = history_1h.get("end") if isinstance(history_1h, dict) else None
+    hist_stale = (
+        _is_num(now_ts)
+        and _is_num(raw_end)
+        and float(now_ts) > 0.0
+        and float(raw_end) > 0.0
+        and (float(now_ts) - float(raw_end)) > 600.0
+    )
 
     arr = history_1h.get("co2_ppm") if isinstance(history_1h, dict) else None
     if not isinstance(arr, list):
@@ -129,7 +140,8 @@ def calc_vent(
 
     den = m * sxx - sx * sx
     if (
-        not n
+        hist_stale
+        or not n
         or m < 10
         or (x1 - x0) < 15.0
         or (n - 1 - last) * step > 600.0
@@ -150,7 +162,7 @@ def calc_vent(
 
     rate = _js_round(((m * sxy - sx * sy) / den) * 60.0)
     cur = float(cur_co2) if _is_num(cur_co2) else y1
-    t1, t2, t3 = co2_thr
+    t1, t2, _t3 = co2_thr
 
     eta: int | None = None
     target: int | None = None
@@ -159,8 +171,7 @@ def calc_vent(
     if rate >= 60:
         state = "rising"
         fast = rate >= 150
-        tgt = t2 if cur < t2 else (t3 if cur < t3 else 0)
-        raw_eta = _js_round(((tgt - cur) / rate) * 60.0) if tgt else 0
+        raw_eta = _js_round(((t2 - cur) / rate) * 60.0) if cur < t2 else 0
         far = cur < t2 and raw_eta > 180
         if cur >= t2:
             level = "bad" if fast else "poor"
@@ -171,9 +182,9 @@ def calc_vent(
 
         if cur >= t2 or (not far and raw_eta < 5):
             action = "ventilate_now"
-        elif not far and cur < t2 and raw_eta >= 5:
+        elif not far:
             eta = raw_eta
-            target = int(tgt)
+            target = int(t2)
     elif rate <= -80:
         state = "ventilating"
         level = "good"
@@ -266,6 +277,7 @@ def calc_week(
     history_7d: dict[str, Any] | None,
     co2_thr: tuple[float, float, float] = DEFAULT_CO2_THRESHOLDS,
     voc_thr: tuple[float, float, float] = DEFAULT_VOC_THRESHOLDS,
+    tz: tzinfo | None = None,
 ) -> dict[str, Any] | None:
     """Compute 7-day CO2 + VOC summary statistics and daily breakdown."""
     if not isinstance(history_7d, dict):
@@ -321,7 +333,10 @@ def calc_week(
                 bucket["v_over"] += 1
 
     def _day_key(ts: float) -> tuple[int, str]:
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+        if tz is not None:
+            dt = datetime.fromtimestamp(ts, tz=tz)
+        else:
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
         return dt.year * 10000 + dt.month * 100 + dt.day, dt.strftime("%Y-%m-%d")
 
     tot = _new_bucket(0, "")
@@ -398,11 +413,14 @@ def compute_insights(
     history_1h: dict[str, Any] | None,
     history_7d: dict[str, Any] | None,
     config: dict[str, Any] | None = None,
+    tz: tzinfo | None = None,
 ) -> dict[str, Any]:
     """Compute all three Insights blocks from status, 1h/7d history, and optional config."""
     readings = status.get("readings") if isinstance(status, dict) else None
     if not isinstance(readings, dict):
         readings = {}
+    device = status.get("device") if isinstance(status, dict) else None
+    now_ts = device.get("unix_time") if isinstance(device, dict) else None
     co2_thr, voc_thr = extract_thresholds(config)
     return {
         "vent": calc_vent(
@@ -411,11 +429,12 @@ def compute_insights(
             co2_thr,
             readings.get("voc_index"),
             voc_thr,
+            now_ts=now_ts,
         ),
         "comfort": calc_comfort(
             readings.get("temperature_c"),
             readings.get("humidity_rh"),
             readings.get("dew_point_c"),
         ),
-        "week": calc_week(history_7d, co2_thr, voc_thr),
+        "week": calc_week(history_7d, co2_thr, voc_thr, tz=tz),
     }

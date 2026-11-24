@@ -12,7 +12,6 @@ from homeassistant.components.update import (
     UpdateEntity,
     UpdateEntityFeature,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -31,7 +30,7 @@ from .const import (
     OTA_INSTALL_TIMEOUT,
     OTA_REBOOT_TIMEOUT,
 )
-from .coordinator import StuffyMeterCoordinator
+from .coordinator import StuffyMeterConfigEntry, StuffyMeterCoordinator
 from .entity import StuffyMeterEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,11 +40,11 @@ ACTIVE_OTA_STATES = frozenset({"receiving", "downloading", "verifying", "success
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: StuffyMeterConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Stuffy Meter firmware update entity."""
-    coordinator: StuffyMeterCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     async_add_entities([StuffyMeterFirmwareUpdate(coordinator)])
 
 
@@ -60,6 +59,7 @@ class StuffyMeterFirmwareUpdate(StuffyMeterEntity, UpdateEntity):
 
     def __init__(self, coordinator: StuffyMeterCoordinator) -> None:
         super().__init__(coordinator, "firmware")
+        self._install_lock = asyncio.Lock()
         self._install_in_progress = False
         self._install_percentage: int | None = None
         self._install_target: str | None = None
@@ -216,65 +216,89 @@ class StuffyMeterFirmwareUpdate(StuffyMeterEntity, UpdateEntity):
     ) -> None:
         """Install the latest firmware via POST /api/ota/check and track progress."""
         del backup, kwargs
-        status_before = (
-            self.coordinator.data
-            if isinstance(self.coordinator.data, dict)
-            else {}
-        )
-        device_before = status_before.get("device") or {}
-        before_version = self.installed_version or ""
-        before_boot = device_before.get("boot_count")
-        before_uptime = device_before.get("uptime_s")
-
-        self._install_in_progress = True
-        self._install_percentage = 0
-        self._install_target = version or self.latest_version
-        self.async_write_ha_state()
-
-        try:
-            try:
-                res = await self.coordinator.client.async_check_ota(install=True)
-            except StuffyMeterAuthError as err:
-                raise HomeAssistantError(
-                    "Admin password is required for firmware updates; "
-                    "set it in Stuffy Meter integration options."
-                ) from err
-            except StuffyMeterError as err:
-                raise HomeAssistantError(str(err)) from err
-
-            if not res.get("update"):
-                await self.coordinator.async_refresh_ota_info()
-                try:
-                    fresh = await self.coordinator.client.async_get_status()
-                except StuffyMeterError:
-                    await self.coordinator.async_request_refresh()
-                else:
-                    self._install_in_progress = False
-                    self._install_percentage = None
-                    self._install_target = None
-                    self.coordinator.async_apply_status(fresh)
-                return
-
-            if not res.get("installing"):
-                await self.coordinator.async_refresh_ota_info()
-                raise HomeAssistantError(
-                    "Firmware update did not start on the monitor."
-                )
-
-            available = res.get("available")
-            if isinstance(available, str) and available.strip():
-                self._install_target = available.strip()
-
-            await self._async_wait_for_install(
-                before_version=before_version,
-                before_boot=before_boot,
-                before_uptime=before_uptime,
+        if self._install_in_progress or self._install_lock.locked():
+            raise HomeAssistantError(
+                "A firmware update is already in progress on this monitor.",
+                translation_domain=DOMAIN,
+                translation_key="ota_already_in_progress",
             )
-        finally:
-            self._install_in_progress = False
-            self._install_percentage = None
-            self._install_target = None
+
+        async with self._install_lock:
+            status_before = (
+                self.coordinator.data
+                if isinstance(self.coordinator.data, dict)
+                else {}
+            )
+            device_before = status_before.get("device") or {}
+            before_version = self.installed_version or ""
+            before_boot = device_before.get("boot_count")
+            before_uptime = device_before.get("uptime_s")
+
+            self._install_in_progress = True
+            self._install_percentage = 0
+            self._install_target = version or self.latest_version
             self.async_write_ha_state()
+
+            try:
+                try:
+                    res = await self.coordinator.client.async_check_ota(install=True)
+                except StuffyMeterAuthError as err:
+                    if (
+                        self.coordinator.hass is not None
+                        and hasattr(self.coordinator.entry, "async_start_reauth")
+                    ):
+                        self.coordinator.entry.async_start_reauth(
+                            self.coordinator.hass
+                        )
+                    raise HomeAssistantError(
+                        "Admin password is required for firmware updates; "
+                        "update it in Stuffy Meter integration options or reauthenticate.",
+                        translation_domain=DOMAIN,
+                        translation_key="auth_required",
+                    ) from err
+                except StuffyMeterError as err:
+                    raise HomeAssistantError(
+                        str(err),
+                        translation_domain=DOMAIN,
+                        translation_key="api_error",
+                        translation_placeholders={"detail": str(err)},
+                    ) from err
+
+                if not res.get("update"):
+                    await self.coordinator.async_refresh_ota_info()
+                    try:
+                        fresh = await self.coordinator.client.async_get_status()
+                    except StuffyMeterError:
+                        await self.coordinator.async_request_refresh()
+                    else:
+                        self._install_in_progress = False
+                        self._install_percentage = None
+                        self._install_target = None
+                        self.coordinator.async_apply_status(fresh)
+                    return
+
+                if not res.get("installing"):
+                    await self.coordinator.async_refresh_ota_info()
+                    raise HomeAssistantError(
+                        "Firmware update did not start on the monitor.",
+                        translation_domain=DOMAIN,
+                        translation_key="ota_not_started",
+                    )
+
+                available = res.get("available")
+                if isinstance(available, str) and available.strip():
+                    self._install_target = available.strip()
+
+                await self._async_wait_for_install(
+                    before_version=before_version,
+                    before_boot=before_boot,
+                    before_uptime=before_uptime,
+                )
+            finally:
+                self._install_in_progress = False
+                self._install_percentage = None
+                self._install_target = None
+                self.async_write_ha_state()
 
     async def _async_wait_for_install(
         self,
@@ -287,6 +311,7 @@ class StuffyMeterFirmwareUpdate(StuffyMeterEntity, UpdateEntity):
         started = time.monotonic()
         deadline = started + OTA_INSTALL_TIMEOUT
         seen_active = False
+        idle_since: float | None = None
         seen_disconnect = False
         disconnect_since: float | None = None
         last_uptime = before_uptime
@@ -308,10 +333,14 @@ class StuffyMeterFirmwareUpdate(StuffyMeterEntity, UpdateEntity):
                         self.coordinator.last_update_success = False
                     if seen_active:
                         raise HomeAssistantError(
-                            "Monitor did not come back online after firmware update reboot."
+                            "Monitor did not come back online after firmware update reboot.",
+                            translation_domain=DOMAIN,
+                            translation_key="ota_reboot_timeout",
                         ) from err
                     raise HomeAssistantError(
-                        "Lost connection to the monitor during firmware update."
+                        "Lost connection to the monitor during firmware update.",
+                        translation_domain=DOMAIN,
+                        translation_key="ota_connection_lost",
                     ) from err
                 continue
             except StuffyMeterError:
@@ -355,8 +384,15 @@ class StuffyMeterFirmwareUpdate(StuffyMeterEntity, UpdateEntity):
                 self.coordinator.async_apply_status(status)
                 last_err = str(ota.get("last_error") or "").strip()
                 detail = f": {last_err}" if last_err else ""
+                rolled_ver = fw_version or before_version
                 raise HomeAssistantError(
-                    f"Firmware update rolled back to {fw_version or before_version}{detail}"
+                    f"Firmware update rolled back to {rolled_ver}{detail}",
+                    translation_domain=DOMAIN,
+                    translation_key="ota_rolled_back",
+                    translation_placeholders={
+                        "version": rolled_ver,
+                        "detail": detail,
+                    },
                 )
 
             if isinstance(uptime_s, (int, float)):
@@ -365,12 +401,14 @@ class StuffyMeterFirmwareUpdate(StuffyMeterEntity, UpdateEntity):
             state = str(ota.get("state") or "")
             if state in ("receiving", "downloading", "verifying"):
                 seen_active = True
+                idle_since = None
                 progress = ota.get("progress")
                 if isinstance(progress, (int, float)):
                     self._install_percentage = max(0, min(100, int(progress)))
                 self.coordinator.async_apply_status(status)
             elif state == "success":
                 seen_active = True
+                idle_since = None
                 self._install_percentage = 100
                 self.coordinator.async_apply_status(status)
             elif state == "failed":
@@ -379,21 +417,52 @@ class StuffyMeterFirmwareUpdate(StuffyMeterEntity, UpdateEntity):
                 self._install_target = None
                 await self.coordinator.async_refresh_ota_info(status)
                 self.coordinator.async_apply_status(status)
-                last_err = str(ota.get("last_error") or "").strip()
+                last_err = str(ota.get("last_error") or "").strip() or "unknown error"
                 raise HomeAssistantError(
-                    f"Firmware update failed: {last_err or 'unknown error'}"
+                    f"Firmware update failed: {last_err}",
+                    translation_domain=DOMAIN,
+                    translation_key="ota_failed",
+                    translation_placeholders={"detail": last_err},
                 )
-            elif not seen_active and (now - started) >= OTA_INSTALL_START_GRACE:
-                last_err = str(ota.get("last_error") or "").strip()
-                raise HomeAssistantError(
-                    f"Firmware update did not start: {last_err or 'monitor remained idle'}"
-                )
-            elif seen_active and (now - started) >= OTA_INSTALL_START_GRACE:
-                last_err = str(ota.get("last_error") or "").strip()
-                raise HomeAssistantError(
-                    f"Firmware update stopped unexpectedly: {last_err or 'monitor returned to idle'}"
-                )
+            elif not seen_active:
+                if (now - started) >= OTA_INSTALL_START_GRACE:
+                    self._install_in_progress = False
+                    self._install_percentage = None
+                    self._install_target = None
+                    await self.coordinator.async_refresh_ota_info(status)
+                    self.coordinator.async_apply_status(status)
+                    last_err = (
+                        str(ota.get("last_error") or "").strip()
+                        or "monitor remained idle"
+                    )
+                    raise HomeAssistantError(
+                        f"Firmware update did not start: {last_err}",
+                        translation_domain=DOMAIN,
+                        translation_key="ota_not_started_detail",
+                        translation_placeholders={"detail": last_err},
+                    )
+            else:
+                if idle_since is None:
+                    idle_since = now
+                elif (now - idle_since) >= OTA_INSTALL_START_GRACE:
+                    self._install_in_progress = False
+                    self._install_percentage = None
+                    self._install_target = None
+                    await self.coordinator.async_refresh_ota_info(status)
+                    self.coordinator.async_apply_status(status)
+                    last_err = (
+                        str(ota.get("last_error") or "").strip()
+                        or "monitor returned to idle"
+                    )
+                    raise HomeAssistantError(
+                        f"Firmware update stopped unexpectedly: {last_err}",
+                        translation_domain=DOMAIN,
+                        translation_key="ota_stopped_unexpectedly",
+                        translation_placeholders={"detail": last_err},
+                    )
 
         raise HomeAssistantError(
-            "Timed out waiting for firmware update to complete."
+            "Timed out waiting for firmware update to complete.",
+            translation_domain=DOMAIN,
+            translation_key="ota_timeout",
         )

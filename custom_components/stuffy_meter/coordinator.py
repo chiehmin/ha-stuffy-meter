@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
+import math
 import time
 from typing import Any
 
@@ -12,8 +13,9 @@ from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
-from .api import StuffyMeterClient, StuffyMeterError
+from .api import StuffyMeterAuthError, StuffyMeterClient, StuffyMeterError
 from .const import (
     CONF_SCAN_INTERVAL,
     CONFIG_REFRESH_INTERVAL,
@@ -21,6 +23,7 @@ from .const import (
     DOMAIN,
     HISTORY_1H_REFRESH_INTERVAL,
     HISTORY_7D_REFRESH_INTERVAL,
+    INSIGHTS_RETRY_INTERVAL,
     OTA_INFO_REFRESH_INTERVAL,
     OTA_INFO_RETRY_INTERVAL,
 )
@@ -84,16 +87,62 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._last_device_name: str | None = None
         self._last_sw_version: str | None = None
+        self._boot_time: datetime | None = None
+        self._last_boot_count: Any = None
+        self._last_uptime_s: float | None = None
+        self._reauth_triggered: bool = False
         self.ota_info: dict[str, Any] | None = None
         self._ota_info_fetched_at: float = 0.0
         self._last_ota_key: tuple[str, str] | None = None
         self.history_1h: dict[str, Any] | None = None
         self._history_1h_fetched_at: float = 0.0
+        self._history_1h_interval: float = HISTORY_1H_REFRESH_INTERVAL
         self.history_7d: dict[str, Any] | None = None
         self._history_7d_fetched_at: float = 0.0
+        self._history_7d_interval: float = HISTORY_7D_REFRESH_INTERVAL
         self.config_data: dict[str, Any] | None = None
         self._config_fetched_at: float = 0.0
+        self._config_interval: float = CONFIG_REFRESH_INTERVAL
         self.insights: dict[str, Any] = {"vent": None, "comfort": None, "week": None}
+
+    def get_boot_time(self) -> datetime | None:
+        """Return a stable UTC boot timestamp, updating only on reboot or major drift."""
+        if not isinstance(self.data, dict):
+            return None
+        device = self.data.get("device")
+        if not isinstance(device, dict):
+            return None
+        raw_uptime = device.get("uptime_s")
+        if (
+            not isinstance(raw_uptime, (int, float))
+            or isinstance(raw_uptime, bool)
+            or not math.isfinite(raw_uptime)
+            or raw_uptime < 0
+        ):
+            return None
+
+        uptime_s = float(raw_uptime)
+        boot_count = device.get("boot_count")
+        estimated = (
+            dt_util.utcnow() - timedelta(seconds=uptime_s)
+        ).replace(microsecond=0)
+
+        rebooted = (
+            self._boot_time is None
+            or (
+                boot_count is not None
+                and self._last_boot_count is not None
+                and boot_count != self._last_boot_count
+            )
+            or (self._last_uptime_s is not None and uptime_s < self._last_uptime_s)
+            or abs((estimated - self._boot_time).total_seconds()) > 60.0
+        )
+        if rebooted:
+            self._boot_time = estimated
+        if boot_count is not None:
+            self._last_boot_count = boot_count
+        self._last_uptime_s = uptime_s
+        return self._boot_time
 
     @property
     def device_id(self) -> str:
@@ -156,47 +205,75 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if callable(get_hist):
             if (
                 self._history_1h_fetched_at == 0.0
-                or (now - self._history_1h_fetched_at) >= HISTORY_1H_REFRESH_INTERVAL
+                or (now - self._history_1h_fetched_at) >= self._history_1h_interval
             ):
-                self._history_1h_fetched_at = now
                 try:
                     self.history_1h = await get_hist(minutes=60, step=1)
                 except StuffyMeterError as err:
+                    self._history_1h_fetched_at = time.monotonic()
+                    self._history_1h_interval = INSIGHTS_RETRY_INTERVAL
                     _LOGGER.debug(
                         "Could not fetch 1h /api/history from %s: %s",
                         self.client.host,
                         err,
                     )
+                else:
+                    self._history_1h_fetched_at = time.monotonic()
+                    self._history_1h_interval = HISTORY_1H_REFRESH_INTERVAL
             if (
                 self._history_7d_fetched_at == 0.0
-                or (now - self._history_7d_fetched_at) >= HISTORY_7D_REFRESH_INTERVAL
+                or (now - self._history_7d_fetched_at) >= self._history_7d_interval
             ):
-                self._history_7d_fetched_at = now
                 try:
                     self.history_7d = await get_hist(minutes=10080, step=30)
                 except StuffyMeterError as err:
+                    self._history_7d_fetched_at = time.monotonic()
+                    self._history_7d_interval = INSIGHTS_RETRY_INTERVAL
                     _LOGGER.debug(
                         "Could not fetch 7d /api/history from %s: %s",
                         self.client.host,
                         err,
                     )
+                else:
+                    self._history_7d_fetched_at = time.monotonic()
+                    self._history_7d_interval = HISTORY_7D_REFRESH_INTERVAL
         get_cfg = getattr(self.client, "async_get_config", None)
         device = data.get("device") if isinstance(data, dict) else None
         auth_open = isinstance(device, dict) and device.get("auth") is False
         can_read_cfg = auth_open or bool(getattr(self.client, "has_password", False))
         if callable(get_cfg) and can_read_cfg and (
             self._config_fetched_at == 0.0
-            or (now - self._config_fetched_at) >= CONFIG_REFRESH_INTERVAL
+            or (now - self._config_fetched_at) >= self._config_interval
         ):
-            self._config_fetched_at = now
             try:
                 self.config_data = await get_cfg()
+            except StuffyMeterAuthError as err:
+                self._config_fetched_at = time.monotonic()
+                self._config_interval = INSIGHTS_RETRY_INTERVAL
+                if (
+                    bool(getattr(self.client, "has_password", False))
+                    and not self._reauth_triggered
+                    and hasattr(self.entry, "async_start_reauth")
+                ):
+                    self._reauth_triggered = True
+                    self.entry.async_start_reauth(self.hass)
+                _LOGGER.debug(
+                    "Admin auth rejected fetching /api/config thresholds from %s: %s",
+                    self.client.host,
+                    err,
+                )
             except StuffyMeterError as err:
+                self._config_fetched_at = time.monotonic()
+                self._config_interval = INSIGHTS_RETRY_INTERVAL
                 _LOGGER.debug(
                     "Could not fetch /api/config thresholds from %s: %s",
                     self.client.host,
                     err,
                 )
+            else:
+                self._reauth_triggered = False
+                self._config_fetched_at = time.monotonic()
+                self._config_interval = CONFIG_REFRESH_INTERVAL
 
     def _recompute_insights(self, data: dict[str, Any]) -> None:
         self.insights = compute_insights(
@@ -204,6 +281,7 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.history_1h,
             self.history_7d,
             self.config_data,
+            tz=dt_util.get_default_time_zone(),
         )
 
     def async_apply_status(self, data: dict[str, Any]) -> None:
@@ -255,9 +333,6 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             return
 
-        self._last_device_name = new_name
-        self._last_sw_version = new_sw
-
         dev_reg = dr.async_get(self.hass)
         if hasattr(dev_reg, "async_get_device_by_identifier"):
             dev_entry = dev_reg.async_get_device_by_identifier(
@@ -269,6 +344,9 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if dev_entry is None:
             return
 
+        self._last_device_name = new_name
+        self._last_sw_version = new_sw
+
         kwargs: dict[str, Any] = {}
         if new_name and dev_entry.name != new_name:
             kwargs["name"] = new_name
@@ -276,3 +354,6 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             kwargs["sw_version"] = str(new_sw)
         if kwargs:
             dev_reg.async_update_device(dev_entry.id, **kwargs)
+
+
+type StuffyMeterConfigEntry = ConfigEntry[StuffyMeterCoordinator]

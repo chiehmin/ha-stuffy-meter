@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 from typing import Any
 
@@ -50,14 +51,16 @@ async def _validate_monitor(
     hass: Any,
     host: str,
     password: str = "",
+    *,
+    require_auth: bool = False,
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """Probe /api/status (and /api/config if password provided)."""
+    """Probe /api/status (and /api/config if password provided or auth verification requested)."""
     errors: dict[str, str] = {}
     session = async_get_clientsession(hass)
     client = StuffyMeterClient(session, host=host, password=password)
     try:
         status = await client.async_get_status()
-        if password:
+        if password or require_auth:
             await client.async_verify_auth()
     except StuffyMeterAuthError:
         errors["base"] = "invalid_auth"
@@ -120,10 +123,7 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_HOST,
                     default=(user_input or {}).get(CONF_HOST, ""),
                 ): str,
-                vol.Optional(
-                    CONF_PASSWORD,
-                    default=(user_input or {}).get(CONF_PASSWORD, ""),
-                ): PASSWORD_SELECTOR,
+                vol.Optional(CONF_PASSWORD): PASSWORD_SELECTOR,
             }
         )
         return self.async_show_form(
@@ -142,12 +142,6 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
         host = discovery_info.host
         if discovery_info.port and discovery_info.port != 80:
             host = f"{host}:{discovery_info.port}"
-        props = discovery_info.properties or {}
-        txt_id = props.get("id")
-
-        if txt_id:
-            await self.async_set_unique_id(str(txt_id).strip().lower())
-            self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
         status, errors = await _validate_monitor(self.hass, host)
         if errors:
@@ -155,7 +149,15 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
 
         dev_id = str(status["device"]["id"]).strip().lower()
         await self.async_set_unique_id(dev_id)
-        self._abort_if_unique_id_configured(updates={CONF_HOST: host})
+
+        updates: dict[str, Any] | None = {CONF_HOST: host}
+        for existing in self._async_current_entries():
+            if existing.unique_id == dev_id:
+                cur_host = str(existing.data.get(CONF_HOST, "")).strip().lower()
+                if cur_host.split(":", 1)[0].endswith(".local"):
+                    updates = None
+                break
+        self._abort_if_unique_id_configured(updates=updates)
 
         self._discovered_host = host
         self._discovered_id = dev_id
@@ -193,10 +195,7 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema(
             {
-                vol.Optional(
-                    CONF_PASSWORD,
-                    default=(user_input or {}).get(CONF_PASSWORD, ""),
-                ): PASSWORD_SELECTOR,
+                vol.Optional(CONF_PASSWORD): PASSWORD_SELECTOR,
             }
         )
         return self.async_show_form(
@@ -215,11 +214,15 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Allow changing host or admin password on an existing entry."""
         entry = self._get_reconfigure_entry()
+        existing_password = entry.options.get(
+            CONF_PASSWORD, entry.data.get(CONF_PASSWORD, "")
+        )
         errors: dict[str, str] = {}
 
         if user_input is not None:
             host = normalize_host(user_input[CONF_HOST])
-            password = user_input.get(CONF_PASSWORD, "")
+            entered_password = user_input.get(CONF_PASSWORD, "")
+            password = entered_password or existing_password
             status, errors = await _validate_monitor(self.hass, host, password)
             if not errors:
                 dev_id = str(status["device"]["id"]).strip().lower()
@@ -244,15 +247,7 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_HOST,
                     default=(user_input or {}).get(CONF_HOST, entry.data[CONF_HOST]),
                 ): str,
-                vol.Optional(
-                    CONF_PASSWORD,
-                    default=(user_input or {}).get(
-                        CONF_PASSWORD,
-                        entry.options.get(
-                            CONF_PASSWORD, entry.data.get(CONF_PASSWORD, "")
-                        ),
-                    ),
-                ): PASSWORD_SELECTOR,
+                vol.Optional(CONF_PASSWORD): PASSWORD_SELECTOR,
             }
         )
         return self.async_show_form(
@@ -261,9 +256,62 @@ class StuffyMeterConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reauth(
+        self,
+        entry_data: Mapping[str, Any],
+    ) -> ConfigFlowResult:
+        """Handle reauthentication when the monitor's admin password changed."""
+        del entry_data
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
+        """Confirm updated admin credentials for an existing Stuffy Meter."""
+        reauth_entry = self._get_reauth_entry()
+        host = reauth_entry.data[CONF_HOST]
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            password = user_input.get(CONF_PASSWORD, "")
+            status, errors = await _validate_monitor(
+                self.hass,
+                host,
+                password,
+                require_auth=True,
+            )
+            if not errors:
+                new_options = {
+                    k: v
+                    for k, v in reauth_entry.options.items()
+                    if k != CONF_PASSWORD
+                }
+                return self.async_update_reload_and_abort(
+                    reauth_entry,
+                    title=extract_device_name(status),
+                    data_updates={CONF_PASSWORD: password},
+                    options=new_options,
+                )
+
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_PASSWORD): PASSWORD_SELECTOR,
+            }
+        )
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=schema,
+            description_placeholders={
+                "name": reauth_entry.title,
+                "host": host,
+            },
+            errors=errors,
+        )
+
 
 class StuffyMeterOptionsFlow(OptionsFlow):
-    """Handle Stuffy Meter options (polling interval and admin password)."""
+    """Handle Stuffy Meter options (polling interval and optional password update)."""
 
     async def async_step_init(
         self,
@@ -275,25 +323,41 @@ class StuffyMeterOptionsFlow(OptionsFlow):
             CONF_SCAN_INTERVAL,
             self.config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
         )
-        current_password = self.config_entry.options.get(
-            CONF_PASSWORD,
-            self.config_entry.data.get(CONF_PASSWORD, ""),
-        )
 
         if user_input is not None:
-            password = user_input.get(CONF_PASSWORD, "")
-            if password:
+            entered_password = user_input.get(CONF_PASSWORD, "")
+            if entered_password:
                 _, errors = await _validate_monitor(
                     self.hass,
                     self.config_entry.data[CONF_HOST],
-                    password,
+                    entered_password,
+                    require_auth=True,
                 )
             if not errors:
+                legacy_opt_pw = self.config_entry.options.get(CONF_PASSWORD)
+                if entered_password:
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry,
+                        data={
+                            **self.config_entry.data,
+                            CONF_PASSWORD: entered_password,
+                        },
+                    )
+                elif (
+                    legacy_opt_pw is not None
+                    and legacy_opt_pw != self.config_entry.data.get(CONF_PASSWORD)
+                ):
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry,
+                        data={
+                            **self.config_entry.data,
+                            CONF_PASSWORD: legacy_opt_pw,
+                        },
+                    )
                 return self.async_create_entry(
                     title="",
                     data={
                         CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
-                        CONF_PASSWORD: password,
                     },
                 )
 
@@ -308,10 +372,7 @@ class StuffyMeterOptionsFlow(OptionsFlow):
                     vol.Coerce(int),
                     vol.Range(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL),
                 ),
-                vol.Optional(
-                    CONF_PASSWORD,
-                    default=(user_input or {}).get(CONF_PASSWORD, current_password),
-                ): PASSWORD_SELECTOR,
+                vol.Optional(CONF_PASSWORD): PASSWORD_SELECTOR,
             }
         )
         return self.async_show_form(

@@ -54,13 +54,13 @@ Copy `custom_components/stuffy_meter` into your Home Assistant `config/custom_co
 | Dew point | `°C` | Primary |
 | Absolute humidity | `g/m³` | Primary |
 | Air quality | `good` / `moderate` / `poor` / `bad` | Primary |
-| Ventilation trend | `steady` / `rising` / `ventilating` / `high_voc` (with `rate_ppm_per_h`, `eta_minutes`, `target_ppm`, `action`, `voc_index` attributes) | Primary |
+| Ventilation trend | `steady` / `rising` / `ventilating` / `high_voc` (with `level`, `action`, `eta_minutes`, `target_ppm`, `voc_level` attributes) | Primary |
 | CO₂ trend rate | `ppm/h` (30-min linear slope) | Primary |
-| Comfort & mold | `comfortable` / `mold_risk` / `muggy` / `dry_air` / `warm` / `cool` (with `level`, `advice`, `dew_point_c` attributes) | Primary |
-| 7-day CO₂ average | `ppm` (with 7-day min/max, hours over threshold, VOC max/hours, and `daily_breakdown` attributes) | Primary |
+| Comfort & mold | `comfortable` / `mold_risk` / `muggy` / `dry_air` / `warm` / `cool` (with `level`, `advice` attributes) | Primary |
+| 7-day CO₂ average | `ppm` (with 7-day min/max, hours over threshold, VOC max/hours, and unrecorded `daily_breakdown` attributes) | Primary |
 | Wi-Fi signal | `dBm` | Diagnostic |
-| Uptime | `s` | Diagnostic |
-| Free heap | `B` | Diagnostic |
+| Uptime | Boot timestamp (`timestamp`) | Diagnostic |
+| Free heap | `B` | Diagnostic (disabled by default) |
 | Firmware version | e.g. `1.10.2` or `1.10.2 → 2.0.1` | Diagnostic |
 
 ### Firmware Update & Buttons (all boards)

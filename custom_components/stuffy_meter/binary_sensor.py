@@ -11,12 +11,10 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
-from .coordinator import StuffyMeterCoordinator
+from .coordinator import StuffyMeterConfigEntry, StuffyMeterCoordinator
 from .entity import StuffyMeterEntity
 
 
@@ -52,11 +50,11 @@ BATTERY_BINARY_SENSORS: tuple[StuffyMeterBinarySensorDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: StuffyMeterConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Stuffy Meter binary sensors (Battery edition only)."""
-    coordinator: StuffyMeterCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     if not coordinator.has_battery:
         return
     async_add_entities(

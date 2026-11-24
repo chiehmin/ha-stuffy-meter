@@ -12,7 +12,6 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     EntityCategory,
     PERCENTAGE,
@@ -20,7 +19,6 @@ from homeassistant.const import (
     UnitOfElectricPotential,
     UnitOfInformation,
     UnitOfTemperature,
-    UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -34,8 +32,14 @@ except ImportError:  # pragma: no cover - Home Assistant < 2026.8
 
     PPM_UNIT = CONCENTRATION_PARTS_PER_MILLION
 
-from .const import DOMAIN
-from .coordinator import StuffyMeterCoordinator
+try:
+    ABS_HUMIDITY_DEVICE_CLASS: SensorDeviceClass | None = (
+        SensorDeviceClass.ABSOLUTE_HUMIDITY
+    )
+except AttributeError:  # pragma: no cover - Home Assistant < 2025.2
+    ABS_HUMIDITY_DEVICE_CLASS = None
+
+from .coordinator import StuffyMeterConfigEntry, StuffyMeterCoordinator
 from .entity import StuffyMeterEntity
 from .insights import COMFORT_STATES, VENTILATION_STATES
 
@@ -146,7 +150,7 @@ def _vent_attrs(coordinator: StuffyMeterCoordinator) -> dict[str, Any] | None:
         "level": vent.get("level"),
         "action": vent.get("action"),
     }
-    for k in ("rate_ppm_per_h", "eta_minutes", "target_ppm", "voc_index", "voc_level"):
+    for k in ("eta_minutes", "target_ppm", "voc_level"):
         if vent.get(k) is not None:
             attrs[k] = vent[k]
     return attrs
@@ -173,9 +177,13 @@ def _comfort_attrs(coordinator: StuffyMeterCoordinator) -> dict[str, Any] | None
         return None
     return {
         k: comfort[k]
-        for k in ("level", "advice", "temperature_c", "humidity_rh", "dew_point_c")
+        for k in ("level", "advice")
         if comfort.get(k) is not None
     }
+
+
+def _uptime_boot_time(coordinator: StuffyMeterCoordinator) -> Any:
+    return coordinator.get_boot_time()
 
 
 def _week_co2_avg(coordinator: StuffyMeterCoordinator) -> int | None:
@@ -248,6 +256,7 @@ BASE_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
     StuffyMeterSensorDescription(
         key="abs_humidity",
         translation_key="abs_humidity",
+        device_class=ABS_HUMIDITY_DEVICE_CLASS,
         icon="mdi:water-percent",
         native_unit_of_measurement="g/m³",
         state_class=SensorStateClass.MEASUREMENT,
@@ -312,11 +321,9 @@ BASE_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
     StuffyMeterSensorDescription(
         key="uptime",
         translation_key="uptime",
-        device_class=SensorDeviceClass.DURATION,
-        native_unit_of_measurement=UnitOfTime.SECONDS,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: _get(d, "device", "uptime_s"),
+        coord_value_fn=_uptime_boot_time,
     ),
     StuffyMeterSensorDescription(
         key="heap_free",
@@ -326,6 +333,7 @@ BASE_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfInformation.BYTES,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
         value_fn=lambda d: _get(d, "device", "heap_free"),
     ),
     StuffyMeterSensorDescription(
@@ -361,11 +369,11 @@ BATTERY_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: StuffyMeterConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Stuffy Meter sensor entities."""
-    coordinator: StuffyMeterCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     descriptions: list[StuffyMeterSensorDescription] = list(BASE_SENSORS)
     if coordinator.has_battery:
         descriptions.extend(BATTERY_SENSORS)
@@ -377,6 +385,7 @@ async def async_setup_entry(
 class StuffyMeterSensor(StuffyMeterEntity, SensorEntity):
     """Representation of a Stuffy Meter sensor."""
 
+    _unrecorded_attributes = frozenset({"daily_breakdown"})
     entity_description: StuffyMeterSensorDescription
 
     def __init__(

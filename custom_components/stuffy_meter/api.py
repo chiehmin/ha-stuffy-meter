@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -43,13 +44,13 @@ class StuffyMeterInvalidResponseError(StuffyMeterError):
 
 
 def normalize_host(host: str) -> str:
-    """Strip scheme, path, query, and trailing slash from a user-provided host or IP."""
+    """Strip scheme, path, query, fragment, and trailing slash from a user-provided host or IP."""
     cleaned = host.strip()
     if "://" in cleaned:
         parsed = urlsplit(cleaned)
         if parsed.netloc:
             return parsed.netloc
-    return cleaned.split("/", 1)[0].strip()
+    return re.split(r"[/?#]", cleaned, maxsplit=1)[0].strip()
 
 
 class StuffyMeterClient:

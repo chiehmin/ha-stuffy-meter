@@ -18,9 +18,16 @@
       },
       "reconfigure": {
         "title": "Reconfigure Stuffy Meter",
-        "description": "Update the monitor's host or admin password.",
+        "description": "Update the monitor's host or admin password. Leave the password blank to keep the existing one.",
         "data": {
           "host": "Host or IP address",
+          "password": "Admin password (optional)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate Stuffy Meter",
+        "description": "The admin password for {name} ({host}) was rejected. Enter the updated admin password (or leave blank if authentication was disabled on the monitor).",
+        "data": {
           "password": "Admin password (optional)"
         }
       }
@@ -35,6 +42,7 @@
       "already_configured": "This Stuffy Meter is already configured.",
       "cannot_connect": "Cannot connect to the discovered Stuffy Meter.",
       "invalid_device": "The discovered device did not return a valid Stuffy Meter status.",
+      "reauth_successful": "Reauthentication succeeded.",
       "reconfigure_successful": "Reconfiguration succeeded.",
       "unique_id_mismatch": "The host belongs to a different Stuffy Meter.",
       "unknown": "Unexpected error during discovery."
@@ -44,10 +52,10 @@
     "step": {
       "init": {
         "title": "Stuffy Meter Options",
-        "description": "Adjust the local polling interval or update the optional admin password.",
+        "description": "Adjust the local polling interval or enter a new admin password (leave blank to keep the existing password).",
         "data": {
           "scan_interval": "Polling interval (seconds)",
-          "password": "Admin password (optional)"
+          "password": "New admin password (optional)"
         }
       }
     },
@@ -56,6 +64,41 @@
       "invalid_auth": "Invalid admin password.",
       "invalid_device": "The monitor did not return a valid status.",
       "unknown": "Unexpected error."
+    }
+  },
+  "exceptions": {
+    "auth_required": {
+      "message": "Admin password is required for this action; update it in Stuffy Meter integration options or reauthenticate."
+    },
+    "api_error": {
+      "message": "Stuffy Meter request failed: {detail}"
+    },
+    "ota_already_in_progress": {
+      "message": "A firmware update is already in progress on this monitor."
+    },
+    "ota_not_started": {
+      "message": "Firmware update did not start on the monitor."
+    },
+    "ota_not_started_detail": {
+      "message": "Firmware update did not start: {detail}"
+    },
+    "ota_stopped_unexpectedly": {
+      "message": "Firmware update stopped unexpectedly: {detail}"
+    },
+    "ota_failed": {
+      "message": "Firmware update failed: {detail}"
+    },
+    "ota_rolled_back": {
+      "message": "Firmware update rolled back to {version}{detail}"
+    },
+    "ota_reboot_timeout": {
+      "message": "Monitor did not come back online after firmware update reboot."
+    },
+    "ota_connection_lost": {
+      "message": "Lost connection to the monitor during firmware update."
+    },
+    "ota_timeout": {
+      "message": "Timed out waiting for firmware update to complete."
     }
   },
   "entity": {

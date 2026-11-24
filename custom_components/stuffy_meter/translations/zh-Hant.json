@@ -18,9 +18,16 @@
       },
       "reconfigure": {
         "title": "重新設定 Stuffy Meter",
-        "description": "更新偵測器的主機位址或管理員密碼。",
+        "description": "更新偵測器的主機位址或管理員密碼。若保留現有密碼請留空。",
         "data": {
           "host": "主機名稱或 IP 位址",
+          "password": "管理員密碼（選填）"
+        }
+      },
+      "reauth_confirm": {
+        "title": "重新驗證 Stuffy Meter",
+        "description": "{name}（{host}）的管理員密碼驗證失敗。請輸入更新後的管理員密碼（若偵測器已停用密碼驗證，請留空）。",
+        "data": {
           "password": "管理員密碼（選填）"
         }
       }
@@ -35,6 +42,7 @@
       "already_configured": "這台 Stuffy Meter 已經設定過了。",
       "cannot_connect": "無法連線至探索到的 Stuffy Meter。",
       "invalid_device": "探索到的裝置未回傳有效的 Stuffy Meter 狀態。",
+      "reauth_successful": "重新驗證成功。",
       "reconfigure_successful": "重新設定成功。",
       "unique_id_mismatch": "該位址對應的是另一台 Stuffy Meter。",
       "unknown": "探索過程中發生未預期的錯誤。"
@@ -44,10 +52,10 @@
     "step": {
       "init": {
         "title": "Stuffy Meter 選項",
-        "description": "調整本地輪詢間隔，或更新選填的管理員密碼。",
+        "description": "調整本地輪詢間隔，或輸入新的管理員密碼（留空以保留現有密碼）。",
         "data": {
           "scan_interval": "輪詢間隔（秒）",
-          "password": "管理員密碼（選填）"
+          "password": "新管理員密碼（選填）"
         }
       }
     },
@@ -56,6 +64,41 @@
       "invalid_auth": "管理員密碼錯誤。",
       "invalid_device": "偵測器未回傳有效的狀態資料。",
       "unknown": "發生未預期的錯誤。"
+    }
+  },
+  "exceptions": {
+    "auth_required": {
+      "message": "此操作需要管理員密碼；請在 Stuffy Meter 整合選項中設定或重新驗證。"
+    },
+    "api_error": {
+      "message": "Stuffy Meter 請求失敗：{detail}"
+    },
+    "ota_already_in_progress": {
+      "message": "此偵測器目前正在進行韌體更新。"
+    },
+    "ota_not_started": {
+      "message": "偵測器未啟動韌體更新。"
+    },
+    "ota_not_started_detail": {
+      "message": "韌體更新未啟動：{detail}"
+    },
+    "ota_stopped_unexpectedly": {
+      "message": "韌體更新意外中止：{detail}"
+    },
+    "ota_failed": {
+      "message": "韌體更新失敗：{detail}"
+    },
+    "ota_rolled_back": {
+      "message": "韌體更新已回復至 {version}{detail}"
+    },
+    "ota_reboot_timeout": {
+      "message": "偵測器在韌體更新重新啟動後未能恢復連線。"
+    },
+    "ota_connection_lost": {
+      "message": "韌體更新期間與偵測器失去連線。"
+    },
+    "ota_timeout": {
+      "message": "等待韌體更新完成逾時。"
     }
   },
   "entity": {
