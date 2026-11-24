@@ -92,6 +92,32 @@
       },
       "firmware_version": {
         "name": "韌體版本"
+      },
+      "ventilation_trend": {
+        "name": "通風趨勢",
+        "state": {
+          "steady": "穩定",
+          "rising": "上升中",
+          "ventilating": "通風中",
+          "high_voc": "VOC 偏高"
+        }
+      },
+      "co2_trend_rate": {
+        "name": "CO₂ 變化速率"
+      },
+      "comfort_mold": {
+        "name": "舒適與防霉",
+        "state": {
+          "comfortable": "舒適",
+          "mold_risk": "發霉風險",
+          "muggy": "悶熱潮濕",
+          "dry_air": "空氣乾燥",
+          "warm": "偏暖",
+          "cool": "偏涼"
+        }
+      },
+      "co2_7d_avg": {
+        "name": "7 日 CO₂ 平均"
       }
     },
     "binary_sensor": {

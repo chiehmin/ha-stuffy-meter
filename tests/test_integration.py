@@ -100,6 +100,27 @@ def _install_ha_stubs() -> dict[str, Any]:
         sys.modules[name] = mod
         return mod
 
+    if "aiohttp" not in sys.modules:
+        try:
+            import aiohttp  # noqa: F401
+        except ImportError:
+            aio_mod = _register("aiohttp", types.ModuleType("aiohttp"))
+
+            class _ClientError(Exception):
+                pass
+
+            class _ContentTypeError(_ClientError):
+                pass
+
+            class _ClientTimeout:
+                def __init__(self, total=None):
+                    self.total = total
+
+            aio_mod.ClientError = _ClientError
+            aio_mod.ContentTypeError = _ContentTypeError
+            aio_mod.ClientTimeout = _ClientTimeout
+            aio_mod.ClientSession = object
+
     ha = _register("homeassistant", types.ModuleType("homeassistant"))
     ha.__path__ = []  # type: ignore[attr-defined]
 
@@ -568,6 +589,9 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
         sys.modules["custom_components.stuffy_meter"] = pkg
         self.const = _load_module("custom_components.stuffy_meter.const", COMP / "const.py")
         self.api = _load_module("custom_components.stuffy_meter.api", COMP / "api.py")
+        self.insights_mod = _load_module(
+            "custom_components.stuffy_meter.insights", COMP / "insights.py"
+        )
         self.coord_mod = _load_module(
             "custom_components.stuffy_meter.coordinator", COMP / "coordinator.py"
         )
@@ -646,6 +670,8 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
 
         client = MagicMock()
         client.host = "192.168.1.42"
+        client.has_password = False
+        client.async_get_history = AsyncMock(return_value={})
         client.base_url = "http://192.168.1.42"
         client.async_get_ota = AsyncMock(
             return_value={
@@ -761,6 +787,8 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
 
         client = MagicMock()
         client.host = "192.168.1.42"
+        client.has_password = False
+        client.async_get_history = AsyncMock(return_value={})
         client.async_get_ota = AsyncMock(return_value={"auto": {}})
 
         coord = self.coord_mod.StuffyMeterCoordinator(object(), self._make_entry(), client)
@@ -843,6 +871,8 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
 
         client = MagicMock()
         client.host = "192.168.1.42"
+        client.has_password = False
+        client.async_get_history = AsyncMock(return_value={})
         client.async_get_ota = AsyncMock(
             return_value={
                 "auto": {
@@ -900,6 +930,8 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
 
         client = MagicMock()
         client.host = "192.168.1.42"
+        client.has_password = False
+        client.async_get_history = AsyncMock(return_value={})
         client.async_get_status = AsyncMock(
             return_value=self._make_status(available_version="")
         )
@@ -968,7 +1000,7 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
         asyncio.run(run())
 
     def test_update_icons_summary_and_firmware_sensor(self) -> None:
-        from unittest.mock import MagicMock
+        from unittest.mock import AsyncMock, MagicMock
 
         sensor_mod = _load_module(
             "custom_components.stuffy_meter.sensor", COMP / "sensor.py"
@@ -976,6 +1008,8 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
 
         client = MagicMock()
         client.host = "192.168.1.42"
+        client.has_password = False
+        client.async_get_history = AsyncMock(return_value={})
         coord = self.coord_mod.StuffyMeterCoordinator(object(), self._make_entry(), client)
         upd = self.update_mod.StuffyMeterFirmwareUpdate(coord)
         fw_desc = next(s for s in sensor_mod.BASE_SENSORS if s.key == "firmware_version")
@@ -1011,6 +1045,200 @@ class TestFirmwareUpdateEntity(unittest.TestCase):
         self.assertIsNone(upd.entity_picture)
         self.assertEqual(upd.icon, "mdi:progress-download")
 
+
+
+class TestInsights(unittest.TestCase):
+    """Test VOC-aware Insights calculations and Home Assistant Insight sensor entities."""
+
+    def setUp(self) -> None:
+        self._saved_mods = _install_ha_stubs()
+        pkg = type(sys)("custom_components.stuffy_meter")
+        pkg.__path__ = [str(COMP)]
+        sys.modules.setdefault("custom_components", type(sys)("custom_components"))
+        sys.modules["custom_components.stuffy_meter"] = pkg
+        self.const = _load_module("custom_components.stuffy_meter.const", COMP / "const.py")
+        self.api = _load_module("custom_components.stuffy_meter.api", COMP / "api.py")
+        self.insights = _load_module(
+            "custom_components.stuffy_meter.insights", COMP / "insights.py"
+        )
+        self.coord_mod = _load_module(
+            "custom_components.stuffy_meter.coordinator", COMP / "coordinator.py"
+        )
+        self.entity_mod = _load_module(
+            "custom_components.stuffy_meter.entity", COMP / "entity.py"
+        )
+        self.sensor_mod = _load_module(
+            "custom_components.stuffy_meter.sensor", COMP / "sensor.py"
+        )
+
+    def tearDown(self) -> None:
+        for mod_name in list(sys.modules):
+            if mod_name.startswith("custom_components.stuffy_meter"):
+                sys.modules.pop(mod_name, None)
+        _restore_modules(self._saved_mods)
+
+    def test_calc_vent_co2_and_voc_cases(self) -> None:
+        # Rising CO2 (+180 ppm/h over 30 min -> 90 ppm rise)
+        rising_hist = {"step_s": 60, "co2_ppm": [800 + i * 3 for i in range(31)]}
+        res = self.insights.calc_vent(rising_hist, 900, (800, 1200, 1600), 105)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["state"], "rising")
+        self.assertEqual(res["rate_ppm_per_h"], 180)
+        self.assertEqual(res["level"], "poor")
+        self.assertEqual(res["eta_minutes"], 100)
+        self.assertEqual(res["target_ppm"], 1200)
+        self.assertEqual(res["action"], "none")
+
+        # Steady CO2 + high VOC -> escalates level & action
+        steady_hist = {"step_s": 60, "co2_ppm": [540] * 31}
+        res_voc = self.insights.calc_vent(steady_hist, 540, (800, 1200, 1600), 320)
+        self.assertEqual(res_voc["state"], "steady")
+        self.assertEqual(res_voc["level"], "poor")
+        self.assertEqual(res_voc["action"], "ventilate_now")
+        self.assertEqual(res_voc["voc_index"], 320)
+
+        # Ventilating CO2 (-240 ppm/h) + high VOC -> keep_airing_out
+        vent_hist = {"step_s": 60, "co2_ppm": [1100 - i * 4 for i in range(31)]}
+        res_air = self.insights.calc_vent(vent_hist, 980, (800, 1200, 1600), 420)
+        self.assertEqual(res_air["state"], "ventilating")
+        self.assertEqual(res_air["rate_ppm_per_h"], -240)
+        self.assertEqual(res_air["level"], "bad")
+        self.assertEqual(res_air["action"], "keep_airing_out")
+
+        # Insufficient CO2 history + high VOC -> high_voc fallback
+        res_no_hist = self.insights.calc_vent({"step_s": 60, "co2_ppm": [500, 505]}, 505, voc_index=280)
+        self.assertEqual(res_no_hist["state"], "high_voc")
+        self.assertIsNone(res_no_hist["rate_ppm_per_h"])
+        self.assertEqual(res_no_hist["level"], "poor")
+        self.assertEqual(res_no_hist["action"], "ventilate_now")
+
+        # Insufficient CO2 history + normal VOC -> None
+        self.assertIsNone(self.insights.calc_vent({"step_s": 60, "co2_ppm": [500, 505]}, 505, voc_index=100))
+
+    def test_calc_comfort_cases(self) -> None:
+        # Mold risk with Magnus dew-point fallback
+        mold = self.insights.calc_comfort(28.0, 73.0, None)
+        self.assertEqual(mold["state"], "mold_risk")
+        self.assertEqual(mold["level"], "bad")
+        self.assertEqual(mold["advice"], "dehumidify")
+        self.assertGreater(mold["dew_point_c"], 22.0)
+
+        # Muggy
+        muggy = self.insights.calc_comfort(27.0, 65.0, 20.5)
+        self.assertEqual(muggy["state"], "muggy")
+        self.assertEqual(muggy["level"], "moderate")
+
+        # Dry air
+        dry = self.insights.calc_comfort(22.0, 24.0, 1.0)
+        self.assertEqual(dry["state"], "dry_air")
+        self.assertEqual(dry["level"], "poor")
+
+        # Warm / Cool / Comfortable
+        self.assertEqual(self.insights.calc_comfort(28.0, 50.0, 16.5)["state"], "warm")
+        self.assertEqual(self.insights.calc_comfort(16.5, 50.0, 6.0)["state"], "cool")
+        comf = self.insights.calc_comfort(23.5, 52.0, 13.0)
+        self.assertEqual(comf["state"], "comfortable")
+        self.assertEqual(comf["level"], "good")
+
+    def test_calc_week_co2_and_voc(self) -> None:
+        hist_7d = {
+            "step_s": 1800,
+            "end": 1763900000,
+            "co2_ppm": [500, 600, 1300, 1400, 800, 700],
+            "voc_index": [100, 120, 260, 310, 270, 110],
+        }
+        wk = self.insights.calc_week(hist_7d, (800, 1200, 1600), (150, 250, 400))
+        self.assertIsNotNone(wk)
+        self.assertEqual(wk["co2_min_ppm"], 500)
+        self.assertEqual(wk["co2_max_ppm"], 1400)
+        self.assertEqual(wk["co2_avg_ppm"], 883)
+        self.assertEqual(wk["co2_hours_over_threshold"], 1.0)
+        self.assertTrue(wk["has_voc"])
+        self.assertEqual(wk["voc_max"], 310)
+        self.assertEqual(wk["voc_hours_over_threshold"], 1.5)
+        self.assertEqual(wk["level"], "moderate")
+        self.assertTrue(wk["daily_breakdown"])
+        self.assertIn("voc_max", wk["daily_breakdown"][0])
+
+        # CO2-only history without timestamps
+        wk_no_voc = self.insights.calc_week({"step_s": 1800, "co2_ppm": [500, 700, 900]})
+        self.assertFalse(wk_no_voc["has_voc"])
+        self.assertIsNone(wk_no_voc["voc_max"])
+        self.assertEqual(wk_no_voc["daily_breakdown"][0]["date"], "0-24h")
+
+    def test_coordinator_and_insight_sensors_end_to_end(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        async def run() -> None:
+            status = {
+                "device": {"id": "a1b2c3", "name": "Living Room", "fw_version": "2.1.1", "auth": False},
+                "readings": {
+                    "co2_ppm": 1020,
+                    "temperature_c": 28.0,
+                    "humidity_rh": 73.0,
+                    "dew_point_c": 22.8,
+                    "voc_index": 290,
+                    "level": "poor",
+                },
+                "network": {"rssi": -54},
+            }
+            hist_1h = {"step_s": 60, "co2_ppm": [900 + i * 4 for i in range(31)]}
+            hist_7d = {
+                "step_s": 1800,
+                "end": 1763900000,
+                "co2_ppm": [500, 700, 900, 1300, 1400, 600],
+                "voc_index": [100, 110, 280, 320, 120, 100],
+            }
+            cfg = {"co2_t1": 800, "co2_t2": 1200, "co2_t3": 1600, "voc_t1": 150, "voc_t2": 250, "voc_t3": 400}
+
+            client = SimpleNamespace(
+                host="192.168.1.42",
+                has_password=False,
+                async_get_status=AsyncMock(return_value=status),
+                async_get_ota=AsyncMock(return_value={"auto": {"last_result": "up_to_date"}}),
+                async_get_history=AsyncMock(
+                    side_effect=lambda *, minutes, step: hist_1h if minutes == 60 else hist_7d
+                ),
+                async_get_config=AsyncMock(return_value=cfg),
+            )
+            entry = SimpleNamespace(entry_id="e1", unique_id="a1b2c3", data={"host": "192.168.1.42"}, options={})
+            coord = self.coord_mod.StuffyMeterCoordinator(object(), entry, client)
+
+            await coord.async_refresh()
+            self.assertTrue(coord.last_update_success)
+            self.assertEqual(client.async_get_history.await_count, 2)
+            self.assertEqual(client.async_get_config.await_count, 1)
+
+            # Second poll immediately after uses cached history & config
+            await coord.async_refresh()
+            self.assertEqual(client.async_get_history.await_count, 2)
+            self.assertEqual(client.async_get_config.await_count, 1)
+
+            by_key = {
+                d.key: self.sensor_mod.StuffyMeterSensor(coord, d)
+                for d in self.sensor_mod.BASE_SENSORS
+            }
+            self.assertEqual(by_key["ventilation_trend"].native_value, "rising")
+            self.assertEqual(by_key["ventilation_trend"].icon, "mdi:trending-up")
+            self.assertEqual(by_key["ventilation_trend"].extra_state_attributes["action"], "ventilate_now")
+            self.assertEqual(by_key["co2_trend_rate"].native_value, 240)
+
+            self.assertEqual(by_key["comfort_mold"].native_value, "mold_risk")
+            self.assertEqual(by_key["comfort_mold"].icon, "mdi:water-alert")
+            self.assertEqual(by_key["comfort_mold"].extra_state_attributes["advice"], "dehumidify")
+
+            self.assertEqual(by_key["co2_7d_avg"].native_value, 900)
+            self.assertEqual(by_key["co2_7d_avg"].extra_state_attributes["voc_max"], 320)
+            self.assertTrue(by_key["co2_7d_avg"].extra_state_attributes["daily_breakdown"])
+
+            # Failing /api/history on older firmware must never fail coordinator refresh
+            coord._history_1h_fetched_at = 0.0
+            client.async_get_history = AsyncMock(side_effect=self.api.StuffyMeterApiError(404, "not found"))
+            await coord.async_refresh()
+            self.assertTrue(coord.last_update_success)
+
+        asyncio.run(run())
 
 if __name__ == "__main__":
     unittest.main()

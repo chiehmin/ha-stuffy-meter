@@ -16,11 +16,15 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .api import StuffyMeterClient, StuffyMeterError
 from .const import (
     CONF_SCAN_INTERVAL,
+    CONFIG_REFRESH_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    HISTORY_1H_REFRESH_INTERVAL,
+    HISTORY_7D_REFRESH_INTERVAL,
     OTA_INFO_REFRESH_INTERVAL,
     OTA_INFO_RETRY_INTERVAL,
 )
+from .insights import compute_insights
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,6 +87,13 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.ota_info: dict[str, Any] | None = None
         self._ota_info_fetched_at: float = 0.0
         self._last_ota_key: tuple[str, str] | None = None
+        self.history_1h: dict[str, Any] | None = None
+        self._history_1h_fetched_at: float = 0.0
+        self.history_7d: dict[str, Any] | None = None
+        self._history_7d_fetched_at: float = 0.0
+        self.config_data: dict[str, Any] | None = None
+        self._config_fetched_at: float = 0.0
+        self.insights: dict[str, Any] = {"vent": None, "comfort": None, "week": None}
 
     @property
     def device_id(self) -> str:
@@ -138,9 +149,67 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return self.ota_info
 
+    async def _async_refresh_insights_sources(self, data: dict[str, Any]) -> None:
+        """Refresh cached 1h/7d history and optional threshold config without failing status."""
+        now = time.monotonic()
+        get_hist = getattr(self.client, "async_get_history", None)
+        if callable(get_hist):
+            if (
+                self._history_1h_fetched_at == 0.0
+                or (now - self._history_1h_fetched_at) >= HISTORY_1H_REFRESH_INTERVAL
+            ):
+                self._history_1h_fetched_at = now
+                try:
+                    self.history_1h = await get_hist(minutes=60, step=1)
+                except StuffyMeterError as err:
+                    _LOGGER.debug(
+                        "Could not fetch 1h /api/history from %s: %s",
+                        self.client.host,
+                        err,
+                    )
+            if (
+                self._history_7d_fetched_at == 0.0
+                or (now - self._history_7d_fetched_at) >= HISTORY_7D_REFRESH_INTERVAL
+            ):
+                self._history_7d_fetched_at = now
+                try:
+                    self.history_7d = await get_hist(minutes=10080, step=30)
+                except StuffyMeterError as err:
+                    _LOGGER.debug(
+                        "Could not fetch 7d /api/history from %s: %s",
+                        self.client.host,
+                        err,
+                    )
+        get_cfg = getattr(self.client, "async_get_config", None)
+        device = data.get("device") if isinstance(data, dict) else None
+        auth_open = isinstance(device, dict) and device.get("auth") is False
+        can_read_cfg = auth_open or bool(getattr(self.client, "has_password", False))
+        if callable(get_cfg) and can_read_cfg and (
+            self._config_fetched_at == 0.0
+            or (now - self._config_fetched_at) >= CONFIG_REFRESH_INTERVAL
+        ):
+            self._config_fetched_at = now
+            try:
+                self.config_data = await get_cfg()
+            except StuffyMeterError as err:
+                _LOGGER.debug(
+                    "Could not fetch /api/config thresholds from %s: %s",
+                    self.client.host,
+                    err,
+                )
+
+    def _recompute_insights(self, data: dict[str, Any]) -> None:
+        self.insights = compute_insights(
+            data,
+            self.history_1h,
+            self.history_7d,
+            self.config_data,
+        )
+
     def async_apply_status(self, data: dict[str, Any]) -> None:
         """Sync device registry metadata and push fresh /api/status data to entities."""
         self._sync_device_registry(data)
+        self._recompute_insights(data)
         self.async_set_updated_data(data)
 
     async def async_check_for_updates(self) -> dict[str, Any]:
@@ -166,6 +235,8 @@ class StuffyMeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._sync_device_registry(data)
         if self._should_refresh_ota_info(data):
             await self.async_refresh_ota_info(data)
+        await self._async_refresh_insights_sources(data)
+        self._recompute_insights(data)
         return data
 
     def _sync_device_registry(self, data: dict[str, Any]) -> None:

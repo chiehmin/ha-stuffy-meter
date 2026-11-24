@@ -5,7 +5,7 @@
 Custom [Home Assistant](https://www.home-assistant.io/) integration for the **Stuffy Meter** CO₂ and VOC air-quality monitor — **100% local, zero cloud, and no MQTT broker required**.
 
 - **Automatic discovery**: Detects Stuffy Meter devices on your LAN via mDNS (`_stuffymeter._tcp` and legacy `_smartaq._tcp`).
-- **Local polling**: Polls `GET /api/status` directly over your local network (default every 15 seconds, configurable 5–300 s).
+- **Local polling**: Polls `GET /api/status` directly over your local network (default every 15 seconds, configurable 5–300 s), plus lightweight 1-hour and 7-day `/api/history` refreshes for actionable **Air Quality Insights**.
 - **No password required for sensors**: Reading sensors, seeing available updates, and triggering **Identify** work out of the box without entering the admin password. The admin password is only needed if you want to trigger **Reboot**, **Check for updates**, or **Firmware** OTA installation from Home Assistant (when an admin password is set on the monitor).
 - **In-app OTA firmware updates**: Native Home Assistant `update` entity surfaces available firmware releases in **Settings → Updates** with release notes links, live download progress (0–100%), and one-click OTA installation directly from the Home Assistant UI.
 - **Supports both hardware editions**: Automatically exposes battery and USB-power entities for Battery edition (rev 4.x) boards alongside USB edition (rev 3.2) boards.
@@ -54,6 +54,10 @@ Copy `custom_components/stuffy_meter` into your Home Assistant `config/custom_co
 | Dew point | `°C` | Primary |
 | Absolute humidity | `g/m³` | Primary |
 | Air quality | `good` / `moderate` / `poor` / `bad` | Primary |
+| Ventilation trend | `steady` / `rising` / `ventilating` / `high_voc` (with `rate_ppm_per_h`, `eta_minutes`, `target_ppm`, `action`, `voc_index` attributes) | Primary |
+| CO₂ trend rate | `ppm/h` (30-min linear slope) | Primary |
+| Comfort & mold | `comfortable` / `mold_risk` / `muggy` / `dry_air` / `warm` / `cool` (with `level`, `advice`, `dew_point_c` attributes) | Primary |
+| 7-day CO₂ average | `ppm` (with 7-day min/max, hours over threshold, VOC max/hours, and `daily_breakdown` attributes) | Primary |
 | Wi-Fi signal | `dBm` | Diagnostic |
 | Uptime | `s` | Diagnostic |
 | Free heap | `B` | Diagnostic |
@@ -76,6 +80,13 @@ Copy `custom_components/stuffy_meter` into your Home Assistant `config/custom_co
 | Battery voltage | Sensor (Diagnostic) | `V` |
 | USB power | Binary sensor | `plug` |
 | Battery charging | Binary sensor | `battery_charging` |
+
+---
+
+## Example Automations (Using Insights)
+
+- **Auto-dehumidify on mold risk:** trigger when `sensor.<room>_comfort_mold` changes to `mold_risk` (or `muggy`) for 10 minutes → turn on your dehumidifier.
+- **Proactive ventilation before CO₂ peaks:** trigger when `sensor.<room>_ventilation_trend` is `rising` and `sensor.<room>_co2_trend_rate` > `150` ppm/h (or when `ventilation_trend` becomes `high_voc`) → boost ERV / exhaust fan.
 
 ---
 

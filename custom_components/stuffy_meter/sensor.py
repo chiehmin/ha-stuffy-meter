@@ -37,16 +37,36 @@ except ImportError:  # pragma: no cover - Home Assistant < 2026.8
 from .const import DOMAIN
 from .coordinator import StuffyMeterCoordinator
 from .entity import StuffyMeterEntity
+from .insights import COMFORT_STATES, VENTILATION_STATES
 
 AIR_QUALITY_LEVELS = ["good", "moderate", "poor", "bad"]
+
+_VENT_ICONS: dict[str, str] = {
+    "rising": "mdi:trending-up",
+    "ventilating": "mdi:weather-windy",
+    "high_voc": "mdi:alert-outline",
+    "steady": "mdi:fan",
+}
+
+_COMFORT_ICONS: dict[str, str] = {
+    "mold_risk": "mdi:water-alert",
+    "muggy": "mdi:water-thermometer",
+    "dry_air": "mdi:water-off",
+    "warm": "mdi:thermometer-high",
+    "cool": "mdi:thermometer-low",
+    "comfortable": "mdi:home-thermometer-outline",
+}
 
 
 @dataclass(frozen=True, kw_only=True)
 class StuffyMeterSensorDescription(SensorEntityDescription):
     """Describe a Stuffy Meter sensor entity."""
 
-    value_fn: Callable[[dict[str, Any]], Any]
+    value_fn: Callable[[dict[str, Any]], Any] | None = None
+    coord_value_fn: Callable[[StuffyMeterCoordinator], Any] | None = None
     icon_fn: Callable[[dict[str, Any]], str | None] | None = None
+    coord_icon_fn: Callable[[StuffyMeterCoordinator], str | None] | None = None
+    extra_attrs_fn: Callable[[StuffyMeterCoordinator], dict[str, Any] | None] | None = None
 
 
 def _get(data: dict[str, Any], section: str, field: str) -> Any:
@@ -96,6 +116,91 @@ def _firmware_version_icon(data: dict[str, Any]) -> str:
     if avail and avail != fw:
         return "mdi:package-up"
     return "mdi:package-check"
+
+
+def _insight_section(
+    coordinator: StuffyMeterCoordinator, key: str
+) -> dict[str, Any] | None:
+    ins = getattr(coordinator, "insights", None)
+    if not isinstance(ins, dict):
+        return None
+    sec = ins.get(key)
+    return sec if isinstance(sec, dict) else None
+
+
+def _vent_state(coordinator: StuffyMeterCoordinator) -> str | None:
+    vent = _insight_section(coordinator, "vent")
+    return vent.get("state") if vent else None
+
+
+def _vent_icon(coordinator: StuffyMeterCoordinator) -> str:
+    state = _vent_state(coordinator)
+    return _VENT_ICONS.get(state or "", "mdi:fan")
+
+
+def _vent_attrs(coordinator: StuffyMeterCoordinator) -> dict[str, Any] | None:
+    vent = _insight_section(coordinator, "vent")
+    if not vent:
+        return None
+    attrs: dict[str, Any] = {
+        "level": vent.get("level"),
+        "action": vent.get("action"),
+    }
+    for k in ("rate_ppm_per_h", "eta_minutes", "target_ppm", "voc_index", "voc_level"):
+        if vent.get(k) is not None:
+            attrs[k] = vent[k]
+    return attrs
+
+
+def _co2_trend_rate(coordinator: StuffyMeterCoordinator) -> int | None:
+    vent = _insight_section(coordinator, "vent")
+    return vent.get("rate_ppm_per_h") if vent else None
+
+
+def _comfort_state(coordinator: StuffyMeterCoordinator) -> str | None:
+    comfort = _insight_section(coordinator, "comfort")
+    return comfort.get("state") if comfort else None
+
+
+def _comfort_icon(coordinator: StuffyMeterCoordinator) -> str:
+    state = _comfort_state(coordinator)
+    return _COMFORT_ICONS.get(state or "", "mdi:home-thermometer-outline")
+
+
+def _comfort_attrs(coordinator: StuffyMeterCoordinator) -> dict[str, Any] | None:
+    comfort = _insight_section(coordinator, "comfort")
+    if not comfort:
+        return None
+    return {
+        k: comfort[k]
+        for k in ("level", "advice", "temperature_c", "humidity_rh", "dew_point_c")
+        if comfort.get(k) is not None
+    }
+
+
+def _week_co2_avg(coordinator: StuffyMeterCoordinator) -> int | None:
+    week = _insight_section(coordinator, "week")
+    return week.get("co2_avg_ppm") if week else None
+
+
+def _week_attrs(coordinator: StuffyMeterCoordinator) -> dict[str, Any] | None:
+    week = _insight_section(coordinator, "week")
+    if not week:
+        return None
+    attrs: dict[str, Any] = {
+        "level": week.get("level"),
+        "co2_min_ppm": week.get("co2_min_ppm"),
+        "co2_max_ppm": week.get("co2_max_ppm"),
+        "co2_hours_over_threshold": week.get("co2_hours_over_threshold"),
+        "co2_threshold_ppm": week.get("co2_threshold_ppm"),
+    }
+    if week.get("has_voc"):
+        attrs["voc_max"] = week.get("voc_max")
+        attrs["voc_hours_over_threshold"] = week.get("voc_hours_over_threshold")
+        attrs["voc_threshold"] = week.get("voc_threshold")
+    if week.get("daily_breakdown") is not None:
+        attrs["daily_breakdown"] = week["daily_breakdown"]
+    return attrs
 
 
 BASE_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
@@ -156,6 +261,44 @@ BASE_SENSORS: tuple[StuffyMeterSensorDescription, ...] = (
         options=AIR_QUALITY_LEVELS,
         icon="mdi:air-filter",
         value_fn=_air_quality_level,
+    ),
+    StuffyMeterSensorDescription(
+        key="ventilation_trend",
+        translation_key="ventilation_trend",
+        device_class=SensorDeviceClass.ENUM,
+        options=VENTILATION_STATES,
+        coord_value_fn=_vent_state,
+        coord_icon_fn=_vent_icon,
+        extra_attrs_fn=_vent_attrs,
+    ),
+    StuffyMeterSensorDescription(
+        key="co2_trend_rate",
+        translation_key="co2_trend_rate",
+        icon="mdi:chart-line",
+        native_unit_of_measurement="ppm/h",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        coord_value_fn=_co2_trend_rate,
+    ),
+    StuffyMeterSensorDescription(
+        key="comfort_mold",
+        translation_key="comfort_mold",
+        device_class=SensorDeviceClass.ENUM,
+        options=COMFORT_STATES,
+        coord_value_fn=_comfort_state,
+        coord_icon_fn=_comfort_icon,
+        extra_attrs_fn=_comfort_attrs,
+    ),
+    StuffyMeterSensorDescription(
+        key="co2_7d_avg",
+        translation_key="co2_7d_avg",
+        device_class=SensorDeviceClass.CO2,
+        native_unit_of_measurement=PPM_UNIT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        icon="mdi:calendar-week",
+        coord_value_fn=_week_co2_avg,
+        extra_attrs_fn=_week_attrs,
     ),
     StuffyMeterSensorDescription(
         key="rssi",
@@ -247,13 +390,24 @@ class StuffyMeterSensor(StuffyMeterEntity, SensorEntity):
     @property
     def native_value(self) -> Any:
         """Return the latest sensor value."""
-        if not self.coordinator.data:
+        if self.entity_description.coord_value_fn is not None:
+            return self.entity_description.coord_value_fn(self.coordinator)
+        if not self.coordinator.data or self.entity_description.value_fn is None:
             return None
         return self.entity_description.value_fn(self.coordinator.data)
 
     @property
     def icon(self) -> str | None:
         """Return dynamic icon when configured, otherwise the description icon."""
+        if self.entity_description.coord_icon_fn is not None:
+            return self.entity_description.coord_icon_fn(self.coordinator)
         if self.entity_description.icon_fn and self.coordinator.data:
             return self.entity_description.icon_fn(self.coordinator.data)
         return self.entity_description.icon
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return extra insight metadata attributes when configured."""
+        if self.entity_description.extra_attrs_fn is not None:
+            return self.entity_description.extra_attrs_fn(self.coordinator)
+        return None

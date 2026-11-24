@@ -92,6 +92,32 @@
       },
       "firmware_version": {
         "name": "Firmware version"
+      },
+      "ventilation_trend": {
+        "name": "Ventilation trend",
+        "state": {
+          "steady": "Steady",
+          "rising": "Rising",
+          "ventilating": "Ventilating",
+          "high_voc": "High VOC"
+        }
+      },
+      "co2_trend_rate": {
+        "name": "CO₂ trend rate"
+      },
+      "comfort_mold": {
+        "name": "Comfort & mold",
+        "state": {
+          "comfortable": "Comfortable",
+          "mold_risk": "Mold risk",
+          "muggy": "Muggy",
+          "dry_air": "Dry air",
+          "warm": "Warm",
+          "cool": "Cool"
+        }
+      },
+      "co2_7d_avg": {
+        "name": "7-day CO₂ average"
       }
     },
     "binary_sensor": {

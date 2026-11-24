@@ -9,7 +9,13 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
-from .const import ADMIN_USERNAME, API_TIMEOUT, IDENTIFY_SECONDS, OTA_CHECK_TIMEOUT
+from .const import (
+    ADMIN_USERNAME,
+    API_TIMEOUT,
+    HISTORY_TIMEOUT,
+    IDENTIFY_SECONDS,
+    OTA_CHECK_TIMEOUT,
+)
 
 
 class StuffyMeterError(Exception):
@@ -70,6 +76,11 @@ class StuffyMeterClient:
     def base_url(self) -> str:
         """Return the base HTTP URL for the monitor."""
         return f"http://{self._host}"
+
+    @property
+    def has_password(self) -> bool:
+        """Return True when an admin password is configured on this client."""
+        return bool(self._password)
 
     def _auth_header(self) -> str | None:
         if not self._password:
@@ -180,6 +191,20 @@ class StuffyMeterClient:
             json_body={},
             use_auth=True,
         )
+
+    async def async_get_history(
+        self, *, minutes: int, step: int
+    ) -> dict[str, Any]:
+        """Fetch GET /api/history?minutes=...&step=... (public endpoint)."""
+        return await self._request_json(
+            "GET",
+            f"/api/history?minutes={int(minutes)}&step={int(step)}",
+            timeout=HISTORY_TIMEOUT,
+        )
+
+    async def async_get_config(self) -> dict[str, Any]:
+        """Fetch GET /api/config (for custom CO2/VOC alert thresholds)."""
+        return await self._request_json("GET", "/api/config", use_auth=True)
 
     async def async_get_ota(self) -> dict[str, Any]:
         """Fetch GET /api/ota (public endpoint: slots, auto-update status, notes URL)."""
